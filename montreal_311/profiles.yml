@@ -1,0 +1,9 @@
+montreal_311:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      # Resolved relative to where dbt is run (montreal_311/).
+      path: ../data/montreal_311.duckdb
+      schema: main
+      threads: 4
