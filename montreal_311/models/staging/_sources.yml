@@ -1,0 +1,15 @@
+version: 2
+
+sources:
+  - name: raw
+    description: >
+      Raw layer in the local DuckDB file, loaded by `ingestion/load_311.py`.
+      Data is untouched: every column is VARCHAR.
+    schema: raw
+    tables:
+      - name: requetes311
+        description: >
+          City of Montréal 311 contacts (requests, complaints, comments and information
+          calls) from 2022 to date, as published on the Montréal open data portal.
+          One row per contact; French column names; all columns stored as text.
+          'Information' contacts have no ID_UNIQUE.

@@ -1,0 +1,107 @@
+version: 2
+
+models:
+  - name: stg_311__contacts
+    description: >
+      Staging view over raw.requetes311, 1:1 with the source (no rows removed). English
+      snake_case names, typed columns, trimmed text, standardized boroughs and postal codes,
+      and row-level data quality flags. All timestamps are Montreal local time
+      (America/Montreal) stored as TIMESTAMP without timezone.
+      Column mapping (source -> staging): ID_UNIQUE -> request_id; NATURE -> contact_nature;
+      ACTI_NOM -> activity_name; TYPE_LIEU_INTERV -> location_type; RUE -> street;
+      RUE_INTERSECTION1 -> cross_street_1; RUE_INTERSECTION2 -> cross_street_2;
+      LOC_ERREUR_GDT -> has_geocoding_error; ARRONDISSEMENT -> borough;
+      ARRONDISSEMENT_GEO -> borough_geo; LIN_CODE_POSTAL -> postal_code;
+      DDS_DATE_CREATION -> created_at; PROVENANCE_ORIGINALE -> original_channel;
+      PROVENANCE_TELEPHONE -> phone_contact_count; PROVENANCE_COURRIEL -> email_contact_count;
+      PROVENANCE_PERSONNE -> in_person_contact_count; PROVENANCE_COURRIER -> mail_contact_count;
+      PROVENANCE_TELECOPIEUR -> fax_contact_count; PROVENANCE_INSTANCE -> council_contact_count;
+      PROVENANCE_MOBILE -> mobile_app_contact_count; PROVENANCE_MEDIASOCIAUX -> social_media_contact_count;
+      PROVENANCE_SITEINTERNET -> website_contact_count; UNITE_RESP_PARENT -> responsible_unit;
+      LOC_LONG -> longitude; LOC_LAT -> latitude; LOC_X -> mtm_x; LOC_Y -> mtm_y;
+      DERNIER_STATUT -> last_status; DATE_DERNIER_STATUT -> last_status_at.
+    columns:
+      - name: contact_sk
+        description: >
+          Surrogate key, one per source row. md5 of a hash of all raw source columns plus a row
+          number within each group of identical rows, so it is deterministic across runs and
+          distinct even for exact duplicates.
+        data_tests:
+          - unique
+          - not_null
+      - name: request_id
+        description: >
+          Request identifier (source ID_UNIQUE), e.g. '22-105694-A'. Null for all 'Information'
+          contacts. Unique among non-null values.
+      - name: request_base_id
+        description: request_id with any trailing '-A'/'-B' letter suffix removed. Null when request_id is null.
+      - name: request_id_suffix
+        description: The single letter after the final hyphen of request_id (e.g. 'A'), or null if there is none.
+      - name: is_unexpected_id_prefix
+        description: True when request_id starts with '20-' or '21-', which is unexpected because all contacts were created in 2022 or later.
+      - name: contact_nature
+        description: >
+          Kind of contact (source NATURE): Requete (service request), Information, Plainte
+          (complaint) or Commentaire (comment).
+      - name: activity_name
+        description: Service or topic the contact is about (source ACTI_NOM), French text. Known casing variants are unified.
+      - name: created_at
+        description: When the contact was created (source DDS_DATE_CREATION). Montreal local time, no timezone.
+      - name: last_status_at
+        description: When the status last changed (source DATE_DERNIER_STATUT). Montreal local time, no timezone. Equals created_at for contacts never updated.
+      - name: last_status
+        description: Most recent status of the contact, French text (e.g. Terminée, Refusée, Prise en charge). Null for 'Information' contacts.
+      - name: original_channel
+        description: Channel through which the contact originally arrived (source PROVENANCE_ORIGINALE), e.g. Téléphone, Mobile, Courriel.
+      - name: phone_contact_count
+        description: Number of times this request was reported by telephone (source PROVENANCE_TELEPHONE). A count, not a 0/1 flag.
+      - name: email_contact_count
+        description: Number of times reported by email (source PROVENANCE_COURRIEL). A count.
+      - name: in_person_contact_count
+        description: Number of times reported in person (source PROVENANCE_PERSONNE). A count.
+      - name: mail_contact_count
+        description: Number of times reported by postal mail (source PROVENANCE_COURRIER). A count.
+      - name: fax_contact_count
+        description: Number of times reported by fax (source PROVENANCE_TELECOPIEUR). A count.
+      - name: council_contact_count
+        description: Number of times reported through a municipal body or council (source PROVENANCE_INSTANCE). A count.
+      - name: mobile_app_contact_count
+        description: Number of times reported through the mobile app (source PROVENANCE_MOBILE). A count.
+      - name: social_media_contact_count
+        description: Number of times reported through social media (source PROVENANCE_MEDIASOCIAUX). A count.
+      - name: website_contact_count
+        description: Number of times reported through the website (source PROVENANCE_SITEINTERNET). A count.
+      - name: responsible_unit
+        description: Parent organizational unit responsible for handling the contact (source UNITE_RESP_PARENT).
+      - name: location_type
+        description: Kind of location (source TYPE_LIEU_INTERV) - Adresse, Intersection, Troncon (street segment) or Installation (facility). Null for 'Information' contacts.
+      - name: street
+        description: Street name of the location (source RUE).
+      - name: cross_street_1
+        description: First cross street for Intersection locations (source RUE_INTERSECTION1).
+      - name: cross_street_2
+        description: Second cross street for Intersection locations (source RUE_INTERSECTION2).
+      - name: postal_code
+        description: Postal code, uppercase with no spaces (e.g. 'H2L3A7').
+      - name: borough
+        description: >
+          Borough or reconciled municipality as recorded on the contact (source ARRONDISSEMENT),
+          with ' - ' separators standardized to '-' to match borough_geo.
+      - name: borough_geo
+        description: Borough derived from the geocoded coordinates (source ARRONDISSEMENT_GEO). Same separator format as borough.
+      - name: borough_mismatch
+        description: True when borough and borough_geo are both present and differ after normalization.
+      - name: is_non_borough_value
+        description: True when borough is a placeholder rather than a real borough ('Ville de Montréal' or 'Extérieur de Montréal').
+      - name: longitude
+        description: Longitude in WGS84 degrees (source LOC_LONG).
+      - name: latitude
+        description: Latitude in WGS84 degrees (source LOC_LAT).
+      - name: mtm_x
+        description: X coordinate in the projected MTM zone 8 system (source LOC_X).
+      - name: mtm_y
+        description: Y coordinate in the projected MTM zone 8 system (source LOC_Y).
+      - name: has_geocoding_error
+        description: True when the city's geographic database flagged a location error (source LOC_ERREUR_GDT = 1).
+      - name: is_exact_duplicate
+        description: True when the row belongs to a group of rows identical across every source column (all copies are flagged, including the first).
