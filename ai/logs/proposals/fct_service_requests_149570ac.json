@@ -1,0 +1,1330 @@
+{
+ "run_id": "149570ac",
+ "model": "fct_service_requests",
+ "created": "2026-10-11T23:49:55.119827+00:00",
+ "llm_model": "claude-sonnet-5-5",
+ "usage": {
+  "input_tokens": 12505,
+  "output_tokens": 2163
+ },
+ "payload_sent": {
+  "model_name": "fct_service_requests",
+  "model_sql": "-- Fact table. Grain: one row per request_id.\n\nselect\n    request_id,\n\n    -- Foreign keys. coalesce(<key>, <unknown>) routes missing values to the Unknown member.\n    {{ date_key('created_at') }}                                        as created_date_key,\n    {{ date_key('last_status_at') }}                                    as last_status_date_key,\n    coalesce({{ dim_key('activity_name') }}, {{ unknown_key() }})       as activity_key,\n    -- Role-playing dimension: two keys into dim_borough.\n    coalesce({{ dim_key('borough') }}, {{ unknown_key() }})             as responsible_borough_key,\n    coalesce({{ dim_key('borough_geo') }}, {{ unknown_key() }})         as location_borough_key,\n\n    request_base_id,\n    request_id_suffix,\n    is_unexpected_id_prefix,\n    contact_nature,\n    created_at,\n    last_status,\n    last_status_at,\n    is_closed,\n    closed_outcome,\n    resolution_days,\n    original_channel,\n    phone_contact_count,\n    email_contact_count,\n    in_person_contact_count,\n    mail_contact_count,\n    fax_contact_count,\n    council_contact_count,\n    mobile_app_contact_count,\n    social_media_contact_count,\n    website_contact_count,\n    responsible_unit,\n    location_type,\n    street,\n    postal_code,\n    latitude,\n    longitude,\n    has_geocoding_error,\n    borough_mismatch\nfrom {{ ref('int_311__service_requests') }}\n",
+  "model_yml": "version: 2\n\nmodels:\n  - name: dim_date\n    description: Calendar dimension, one row per day from the earliest to the latest date in the data. Generated in SQL.\n    columns:\n      - name: date_key\n        description: Integer yyyymmdd (primary key).\n        data_tests: [unique, not_null]\n      - name: date_day\n        description: The calendar date.\n      - name: year\n        description: Calendar year.\n      - name: quarter\n        description: Calendar quarter, 1-4.\n      - name: month\n        description: Month number, 1-12.\n      - name: month_name\n        description: English month name.\n      - name: day_of_month\n        description: Day of the month.\n      - name: day_of_week\n        description: ISO day of week, 1 = Monday to 7 = Sunday.\n      - name: day_name\n        description: English weekday name.\n      - name: is_weekend\n        description: True for Saturday and Sunday.\n      - name: week_start_date\n        description: Monday of the week containing the date.\n\n  - name: dim_borough\n    description: >\n      One row per normalized borough value found in either borough column, plus an Unknown\n      member. Role-playing dimension joined twice by fct_service_requests.\n    columns:\n      - name: borough_key\n        description: Surrogate key, md5 of the borough name (primary key). The Unknown member has a reserved key.\n        data_tests: [unique, not_null]\n      - name: borough_name\n        description: Borough or municipality name in 'A-B' format, or 'Unknown'.\n      - name: is_non_borough_value\n        description: True for placeholder values that are not real boroughs (Ville de Montréal, Extérieur de Montréal).\n      - name: is_unknown_member\n        description: True only for the Unknown row, which facts point at when a borough is missing.\n\n  - name: dim_activity\n    description: >\n      One row per activity (source ACTI_NOM), plus an Unknown member for missing names. Carries\n      no nature or location-type columns because an activity occurs under several natures.\n    columns:\n      - name: activity_key\n        description: Surrogate key, md5 of the activity name (primary key).\n        data_tests: [unique, not_null]\n      - name: activity_name\n        description: Activity name (French), or 'Unknown'.\n      - name: is_unknown_member\n        description: True only for the Unknown row.\n\n  - name: fct_service_requests\n    description: Requests, complaints and comments. Grain is one row per request_id.\n    columns:\n      - name: request_id\n        description: Request identifier (primary key).\n        data_tests: [unique, not_null]\n      - name: created_date_key\n        description: Foreign key to dim_date for the creation date.\n      - name: last_status_date_key\n        description: Foreign key to dim_date for the last status date.\n      - name: activity_key\n        description: Foreign key to dim_activity. Points at the Unknown member when the activity is missing.\n      - name: responsible_borough_key\n        description: Foreign key to dim_borough from the recorded borough (source ARRONDISSEMENT). Unknown member when missing.\n      - name: location_borough_key\n        description: Foreign key to dim_borough from the geocoded borough (source ARRONDISSEMENT_GEO). Unknown member when missing.\n      - name: request_base_id\n        description: request_id without its '-A'/'-B' suffix.\n      - name: request_id_suffix\n        description: Letter suffix of request_id, or null.\n      - name: is_unexpected_id_prefix\n        description: True when request_id starts with '20-' or '21-'.\n      - name: contact_nature\n        description: Requete, Plainte or Commentaire.\n      - name: created_at\n        description: Creation time, Montreal local time.\n      - name: last_status\n        description: Most recent status (French).\n      - name: last_status_at\n        description: Time of the most recent status change, Montreal local time.\n      - name: is_closed\n        description: True when the status is terminal per the status_mapping seed.\n      - name: closed_outcome\n        description: completed, refused, cancelled or deleted; null while open.\n      - name: resolution_days\n        description: Fractional days from creation to last status, only for closed requests (last_status_at is a proxy for close time).\n      - name: original_channel\n        description: Channel the request first arrived through.\n      - name: phone_contact_count\n        description: Times reported by telephone.\n      - name: email_contact_count\n        description: Times reported by email.\n      - name: in_person_contact_count\n        description: Times reported in person.\n      - name: mail_contact_count\n        description: Times reported by postal mail.\n      - name: fax_contact_count\n        description: Times reported by fax.\n      - name: council_contact_count\n        description: Times reported through a municipal body or council.\n      - name: mobile_app_contact_count\n        description: Times reported through the mobile app.\n      - name: social_media_contact_count\n        description: Times reported through social media.\n      - name: website_contact_count\n        description: Times reported through the website.\n      - name: responsible_unit\n        description: Responsible organizational unit as text; deliberately not joined to dim_borough.\n      - name: location_type\n        description: Adresse, Intersection, Troncon or Installation.\n      - name: street\n        description: Street name of the location.\n      - name: postal_code\n        description: Postal code, uppercase, no spaces.\n      - name: latitude\n        description: WGS84 latitude.\n      - name: longitude\n        description: WGS84 longitude.\n      - name: has_geocoding_error\n        description: True when the city flagged a geocoding error.\n      - name: borough_mismatch\n        description: True when the recorded and geocoded boroughs are both present and differ.\n\n  - name: fct_information_contacts\n    description: Information calls with no request_id. Grain is one row per contact_sk.\n    columns:\n      - name: contact_sk\n        description: Surrogate key (primary key).\n        data_tests: [unique, not_null]\n      - name: created_date_key\n        description: Foreign key to dim_date for the call date.\n      - name: activity_key\n        description: Foreign key to dim_activity. Unknown member when missing.\n      - name: contact_nature\n        description: Always 'Information'.\n      - name: created_at\n        description: Call time, Montreal local time.\n      - name: original_channel\n        description: Channel the contact arrived through.\n      - name: phone_contact_count\n        description: Times reported by telephone.\n      - name: email_contact_count\n        description: Times reported by email.\n      - name: in_person_contact_count\n        description: Times reported in person.\n      - name: mail_contact_count\n        description: Times reported by postal mail.\n      - name: fax_contact_count\n        description: Times reported by fax.\n      - name: council_contact_count\n        description: Times reported through a municipal body or council.\n      - name: mobile_app_contact_count\n        description: Times reported through the mobile app.\n      - name: social_media_contact_count\n        description: Times reported through social media.\n      - name: website_contact_count\n        description: Times reported through the website.\n      - name: responsible_unit\n        description: Responsible organizational unit (text).\n      - name: is_exact_duplicate\n        description: True when the row has identical copies across every source column.\n",
+  "column_profile": {
+   "row_count": 1756293,
+   "columns": {
+    "request_id": {
+     "type": "VARCHAR",
+     "null_pct": 0.0,
+     "distinct_count": 1756293,
+     "all_distinct": true,
+     "min_length": 4,
+     "max_length": 11
+    },
+    "created_date_key": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 1744,
+     "all_distinct": false,
+     "min": "20220101",
+     "max": "20261010"
+    },
+    "last_status_date_key": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 1744,
+     "all_distinct": false,
+     "min": "20220101",
+     "max": "20261010"
+    },
+    "activity_key": {
+     "type": "VARCHAR",
+     "null_pct": 0.0,
+     "distinct_count": 937,
+     "all_distinct": false,
+     "min_length": 32,
+     "max_length": 32
+    },
+    "responsible_borough_key": {
+     "type": "VARCHAR",
+     "null_pct": 0.0,
+     "distinct_count": 36,
+     "all_distinct": false,
+     "min_length": 32,
+     "max_length": 32,
+     "top_values": [
+      {
+       "value": "0ee00e66b8ef9cb056edc81f0db09e69",
+       "count": 172780
+      },
+      {
+       "value": "c6c6fff068a307f4c406f4b8f29536fc",
+       "count": 148514
+      },
+      {
+       "value": "952771a712dba511098a4379a959d6b6",
+       "count": 145208
+      },
+      {
+       "value": "9002d738db82023e6f9c1da62ee8345f",
+       "count": 144170
+      },
+      {
+       "value": "5edec21d9cb399e0a9dd7d3df263d5f0",
+       "count": 140650
+      },
+      {
+       "value": "41fbe9aa78580fab4c4c28eca382b77d",
+       "count": 139198
+      },
+      {
+       "value": "24bdd8245f1a62ebab767b6fa677c6cc",
+       "count": 128344
+      },
+      {
+       "value": "fc11755024e8122356a4b53436143fa0",
+       "count": 113862
+      },
+      {
+       "value": "8ad127481f70a6b1f277cbfa92f6a1bc",
+       "count": 97791
+      },
+      {
+       "value": "f4e28d87db027a458d9745bff0c7d666",
+       "count": 96923
+      }
+     ],
+     "values_complete": false
+    },
+    "location_borough_key": {
+     "type": "VARCHAR",
+     "null_pct": 0.0,
+     "distinct_count": 34,
+     "all_distinct": false,
+     "min_length": 32,
+     "max_length": 32,
+     "top_values": [
+      {
+       "value": "0ee00e66b8ef9cb056edc81f0db09e69",
+       "count": 172103
+      },
+      {
+       "value": "c6c6fff068a307f4c406f4b8f29536fc",
+       "count": 147882
+      },
+      {
+       "value": "952771a712dba511098a4379a959d6b6",
+       "count": 144900
+      },
+      {
+       "value": "5edec21d9cb399e0a9dd7d3df263d5f0",
+       "count": 143129
+      },
+      {
+       "value": "9002d738db82023e6f9c1da62ee8345f",
+       "count": 142130
+      },
+      {
+       "value": "41fbe9aa78580fab4c4c28eca382b77d",
+       "count": 138886
+      },
+      {
+       "value": "24bdd8245f1a62ebab767b6fa677c6cc",
+       "count": 129627
+      },
+      {
+       "value": "fc11755024e8122356a4b53436143fa0",
+       "count": 113316
+      },
+      {
+       "value": "8ad127481f70a6b1f277cbfa92f6a1bc",
+       "count": 97127
+      },
+      {
+       "value": "f4e28d87db027a458d9745bff0c7d666",
+       "count": 96978
+      }
+     ],
+     "values_complete": false
+    },
+    "request_base_id": {
+     "type": "VARCHAR",
+     "null_pct": 0.0,
+     "distinct_count": 1756282,
+     "all_distinct": false,
+     "min_length": 4,
+     "max_length": 9
+    },
+    "request_id_suffix": {
+     "type": "VARCHAR",
+     "null_pct": 99.895,
+     "distinct_count": 2,
+     "all_distinct": false,
+     "min_length": 1,
+     "max_length": 1,
+     "top_values": [
+      {
+       "value": "A",
+       "count": 1827
+      },
+      {
+       "value": "B",
+       "count": 11
+      }
+     ],
+     "values_complete": true
+    },
+    "is_unexpected_id_prefix": {
+     "type": "BOOLEAN",
+     "null_pct": 0.0,
+     "distinct_count": 2,
+     "all_distinct": false,
+     "top_values": [
+      {
+       "value": false,
+       "count": 1756290
+      },
+      {
+       "value": true,
+       "count": 3
+      }
+     ],
+     "values_complete": true
+    },
+    "contact_nature": {
+     "type": "VARCHAR",
+     "null_pct": 0.0,
+     "distinct_count": 3,
+     "all_distinct": false,
+     "min_length": 7,
+     "max_length": 11,
+     "top_values": [
+      {
+       "value": "Requete",
+       "count": 1698140
+      },
+      {
+       "value": "Commentaire",
+       "count": 29559
+      },
+      {
+       "value": "Plainte",
+       "count": 28594
+      }
+     ],
+     "values_complete": true
+    },
+    "created_at": {
+     "type": "TIMESTAMP",
+     "null_pct": 0.0,
+     "distinct_count": 1730112,
+     "all_distinct": false,
+     "min": "2022-01-01 00:13:06",
+     "max": "2026-10-10 21:52:12"
+    },
+    "last_status": {
+     "type": "VARCHAR",
+     "null_pct": 0.0,
+     "distinct_count": 9,
+     "all_distinct": false,
+     "min_length": 7,
+     "max_length": 25,
+     "top_values": [
+      {
+       "value": "Terminée",
+       "count": 1653784
+      },
+      {
+       "value": "Refusée",
+       "count": 47195
+      },
+      {
+       "value": "Prise en charge",
+       "count": 29910
+      },
+      {
+       "value": "Annulée",
+       "count": 10688
+      },
+      {
+       "value": "Transmise pour traitement",
+       "count": 9090
+      },
+      {
+       "value": "Acceptée",
+       "count": 4355
+      },
+      {
+       "value": "Supprimée",
+       "count": 1085
+      },
+      {
+       "value": "Réactivée",
+       "count": 157
+      },
+      {
+       "value": "Urgente",
+       "count": 29
+      }
+     ],
+     "values_complete": true
+    },
+    "last_status_at": {
+     "type": "TIMESTAMP",
+     "null_pct": 0.0,
+     "distinct_count": 1596753,
+     "all_distinct": false,
+     "min": "2022-01-01 06:03:54",
+     "max": "2026-10-10 23:46:41"
+    },
+    "is_closed": {
+     "type": "BOOLEAN",
+     "null_pct": 0.0,
+     "distinct_count": 2,
+     "all_distinct": false,
+     "top_values": [
+      {
+       "value": true,
+       "count": 1712752
+      },
+      {
+       "value": false,
+       "count": 43541
+      }
+     ],
+     "values_complete": true
+    },
+    "closed_outcome": {
+     "type": "VARCHAR",
+     "null_pct": 2.479,
+     "distinct_count": 4,
+     "all_distinct": false,
+     "min_length": 7,
+     "max_length": 9,
+     "top_values": [
+      {
+       "value": "completed",
+       "count": 1653784
+      },
+      {
+       "value": "refused",
+       "count": 47195
+      },
+      {
+       "value": "cancelled",
+       "count": 10688
+      },
+      {
+       "value": "deleted",
+       "count": 1085
+      }
+     ],
+     "values_complete": true
+    },
+    "resolution_days": {
+     "type": "DOUBLE",
+     "null_pct": 2.479,
+     "distinct_count": 1003260,
+     "all_distinct": false,
+     "min": "0.0",
+     "max": "1709.030949074074"
+    },
+    "original_channel": {
+     "type": "VARCHAR",
+     "null_pct": 0.105,
+     "distinct_count": 9,
+     "all_distinct": false,
+     "min_length": 6,
+     "max_length": 14,
+     "top_values": [
+      {
+       "value": "Téléphone",
+       "count": 1243337
+      },
+      {
+       "value": "Mobile",
+       "count": 175605
+      },
+      {
+       "value": "Personne",
+       "count": 148513
+      },
+      {
+       "value": "Internet",
+       "count": 95912
+      },
+      {
+       "value": "Courriel",
+       "count": 86832
+      },
+      {
+       "value": "Courrier",
+       "count": 1956
+      },
+      {
+       "value": "Instance",
+       "count": 1756
+      },
+      {
+       "value": "Médias sociaux",
+       "count": 517
+      },
+      {
+       "value": "Télécopieur",
+       "count": 26
+      }
+     ],
+     "values_complete": true
+    },
+    "phone_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 42,
+     "all_distinct": false,
+     "min": "0",
+     "max": "60"
+    },
+    "email_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 23,
+     "all_distinct": false,
+     "min": "0",
+     "max": "37"
+    },
+    "in_person_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 15,
+     "all_distinct": false,
+     "min": "0",
+     "max": "15",
+     "top_values": [
+      {
+       "value": "0",
+       "count": 1606364
+      },
+      {
+       "value": "1",
+       "count": 138594
+      },
+      {
+       "value": "2",
+       "count": 8682
+      },
+      {
+       "value": "3",
+       "count": 1807
+      },
+      {
+       "value": "4",
+       "count": 519
+      },
+      {
+       "value": "5",
+       "count": 175
+      },
+      {
+       "value": "6",
+       "count": 77
+      },
+      {
+       "value": "7",
+       "count": 30
+      },
+      {
+       "value": "8",
+       "count": 19
+      },
+      {
+       "value": "10",
+       "count": 9
+      }
+     ],
+     "values_complete": false
+    },
+    "mail_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 4,
+     "all_distinct": false,
+     "min": "0",
+     "max": "3",
+     "top_values": [
+      {
+       "value": "0",
+       "count": 1754283
+      },
+      {
+       "value": "1",
+       "count": 1937
+      },
+      {
+       "value": "2",
+       "count": 60
+      },
+      {
+       "value": "3",
+       "count": 13
+      }
+     ],
+     "values_complete": true
+    },
+    "fax_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 2,
+     "all_distinct": false,
+     "min": "0",
+     "max": "1",
+     "top_values": [
+      {
+       "value": "0",
+       "count": 1756267
+      },
+      {
+       "value": "1",
+       "count": 26
+      }
+     ],
+     "values_complete": true
+    },
+    "council_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 6,
+     "all_distinct": false,
+     "min": "0",
+     "max": "6",
+     "top_values": [
+      {
+       "value": "0",
+       "count": 1754511
+      },
+      {
+       "value": "1",
+       "count": 1732
+      },
+      {
+       "value": "2",
+       "count": 44
+      },
+      {
+       "value": "3",
+       "count": 3
+      },
+      {
+       "value": "4",
+       "count": 2
+      },
+      {
+       "value": "6",
+       "count": 1
+      }
+     ],
+     "values_complete": true
+    },
+    "mobile_app_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 32,
+     "all_distinct": false,
+     "min": "0",
+     "max": "49",
+     "top_values": [
+      {
+       "value": "0",
+       "count": 1575446
+      },
+      {
+       "value": "1",
+       "count": 165157
+      },
+      {
+       "value": "2",
+       "count": 12040
+      },
+      {
+       "value": "3",
+       "count": 2263
+      },
+      {
+       "value": "4",
+       "count": 747
+      },
+      {
+       "value": "5",
+       "count": 299
+      },
+      {
+       "value": "6",
+       "count": 116
+      },
+      {
+       "value": "7",
+       "count": 77
+      },
+      {
+       "value": "8",
+       "count": 39
+      },
+      {
+       "value": "9",
+       "count": 27
+      }
+     ],
+     "values_complete": false
+    },
+    "social_media_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 8,
+     "all_distinct": false,
+     "min": "0",
+     "max": "7",
+     "top_values": [
+      {
+       "value": "0",
+       "count": 1755751
+      },
+      {
+       "value": "1",
+       "count": 489
+      },
+      {
+       "value": "2",
+       "count": 33
+      },
+      {
+       "value": "3",
+       "count": 11
+      },
+      {
+       "value": "4",
+       "count": 4
+      },
+      {
+       "value": "6",
+       "count": 2
+      },
+      {
+       "value": "7",
+       "count": 2
+      },
+      {
+       "value": "5",
+       "count": 1
+      }
+     ],
+     "values_complete": true
+    },
+    "website_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 27,
+     "all_distinct": false,
+     "min": "0",
+     "max": "84",
+     "top_values": [
+      {
+       "value": "0",
+       "count": 1656273
+      },
+      {
+       "value": "1",
+       "count": 91466
+      },
+      {
+       "value": "2",
+       "count": 6423
+      },
+      {
+       "value": "3",
+       "count": 1251
+      },
+      {
+       "value": "4",
+       "count": 413
+      },
+      {
+       "value": "5",
+       "count": 197
+      },
+      {
+       "value": "6",
+       "count": 100
+      },
+      {
+       "value": "7",
+       "count": 56
+      },
+      {
+       "value": "8",
+       "count": 34
+      },
+      {
+       "value": "9",
+       "count": 26
+      }
+     ],
+     "values_complete": false
+    },
+    "responsible_unit": {
+     "type": "VARCHAR",
+     "null_pct": 0.0,
+     "distinct_count": 47,
+     "all_distinct": false,
+     "min_length": 5,
+     "max_length": 60,
+     "top_values": [
+      {
+       "value": "ROSEMONT - LA PETITE-PATRIE",
+       "count": 200167
+      },
+      {
+       "value": "MERCIER - HOCHELAGA-MAISONNEUVE",
+       "count": 156038
+      },
+      {
+       "value": "SAINT-LAURENT",
+       "count": 135175
+      },
+      {
+       "value": "AHUNTSIC-CARTIERVILLE",
+       "count": 127498
+      },
+      {
+       "value": "PLATEAU-MONT-ROYAL",
+       "count": 126812
+      },
+      {
+       "value": "VILLE-MARIE",
+       "count": 123840
+      },
+      {
+       "value": "VILLERAY - ST-MICHEL - PARC-EXTENSION",
+       "count": 113200
+      },
+      {
+       "value": "COTE-DES-NEIGES - NOTRE-DAME-DE-GRÂCE",
+       "count": 101909
+      },
+      {
+       "value": "RIVIÈRE-DES-PRAIRIES - POINTE-AUX-TREMBLES",
+       "count": 86603
+      },
+      {
+       "value": "SUD-OUEST",
+       "count": 85372
+      }
+     ],
+     "values_complete": false
+    },
+    "location_type": {
+     "type": "VARCHAR",
+     "null_pct": 0.0,
+     "distinct_count": 4,
+     "all_distinct": false,
+     "min_length": 7,
+     "max_length": 12,
+     "top_values": [
+      {
+       "value": "Adresse",
+       "count": 1478674
+      },
+      {
+       "value": "Intersection",
+       "count": 195665
+      },
+      {
+       "value": "Troncon",
+       "count": 68356
+      },
+      {
+       "value": "Installation",
+       "count": 13592
+      }
+     ],
+     "values_complete": true
+    },
+    "street": {
+     "type": "VARCHAR",
+     "null_pct": 13.575,
+     "distinct_count": 4808,
+     "all_distinct": false,
+     "min_length": 6,
+     "max_length": 40
+    },
+    "postal_code": {
+     "type": "VARCHAR",
+     "null_pct": 21.341,
+     "distinct_count": 34873,
+     "all_distinct": false,
+     "min_length": 6,
+     "max_length": 6
+    },
+    "latitude": {
+     "type": "DOUBLE",
+     "null_pct": 0.086,
+     "distinct_count": 59973,
+     "all_distinct": false,
+     "min": "45.40269849581368",
+     "max": "45.703663947"
+    },
+    "longitude": {
+     "type": "DOUBLE",
+     "null_pct": 0.086,
+     "distinct_count": 59977,
+     "all_distinct": false,
+     "min": "-73.97692901042555",
+     "max": "-73.47932556503345"
+    },
+    "has_geocoding_error": {
+     "type": "BOOLEAN",
+     "null_pct": 0.086,
+     "distinct_count": 2,
+     "all_distinct": false,
+     "top_values": [
+      {
+       "value": false,
+       "count": 1690189
+      },
+      {
+       "value": true,
+       "count": 64599
+      }
+     ],
+     "values_complete": true
+    },
+    "borough_mismatch": {
+     "type": "BOOLEAN",
+     "null_pct": 0.0,
+     "distinct_count": 2,
+     "all_distinct": false,
+     "top_values": [
+      {
+       "value": false,
+       "count": 1744319
+      },
+      {
+       "value": true,
+       "count": 11974
+      }
+     ],
+     "values_complete": true
+    }
+   }
+  },
+  "existing_tests": [
+   {
+    "column": "request_id",
+    "test": "unique"
+   },
+   {
+    "column": "request_id",
+    "test": "not_null"
+   }
+  ],
+  "available_models": {
+   "int_311__service_requests": [
+    "request_id",
+    "request_base_id",
+    "request_id_suffix",
+    "is_unexpected_id_prefix",
+    "contact_nature",
+    "activity_name",
+    "created_at",
+    "last_status",
+    "last_status_at",
+    "is_closed",
+    "closed_outcome",
+    "resolution_days",
+    "original_channel",
+    "phone_contact_count",
+    "email_contact_count",
+    "in_person_contact_count",
+    "mail_contact_count",
+    "fax_contact_count",
+    "council_contact_count",
+    "mobile_app_contact_count",
+    "social_media_contact_count",
+    "website_contact_count",
+    "responsible_unit",
+    "location_type",
+    "street",
+    "cross_street_1",
+    "cross_street_2",
+    "postal_code",
+    "borough",
+    "borough_geo",
+    "borough_mismatch",
+    "longitude",
+    "latitude",
+    "has_geocoding_error"
+   ],
+   "int_311__information_contacts": [
+    "contact_sk",
+    "contact_nature",
+    "activity_name",
+    "created_at",
+    "original_channel",
+    "phone_contact_count",
+    "email_contact_count",
+    "in_person_contact_count",
+    "mail_contact_count",
+    "fax_contact_count",
+    "council_contact_count",
+    "mobile_app_contact_count",
+    "social_media_contact_count",
+    "website_contact_count",
+    "responsible_unit",
+    "is_exact_duplicate"
+   ],
+   "dim_date": [
+    "date_key",
+    "date_day",
+    "year",
+    "quarter",
+    "month",
+    "month_name",
+    "day_of_month",
+    "day_of_week",
+    "day_name",
+    "is_weekend",
+    "week_start_date"
+   ],
+   "dim_borough": [
+    "borough_key",
+    "borough_name",
+    "is_non_borough_value",
+    "is_unknown_member"
+   ],
+   "dim_activity": [
+    "activity_key",
+    "activity_name",
+    "is_unknown_member"
+   ],
+   "fct_service_requests": [
+    "request_id",
+    "created_date_key",
+    "last_status_date_key",
+    "activity_key",
+    "responsible_borough_key",
+    "location_borough_key",
+    "request_base_id",
+    "request_id_suffix",
+    "is_unexpected_id_prefix",
+    "contact_nature",
+    "created_at",
+    "last_status",
+    "last_status_at",
+    "is_closed",
+    "closed_outcome",
+    "resolution_days",
+    "original_channel",
+    "phone_contact_count",
+    "email_contact_count",
+    "in_person_contact_count",
+    "mail_contact_count",
+    "fax_contact_count",
+    "council_contact_count",
+    "mobile_app_contact_count",
+    "social_media_contact_count",
+    "website_contact_count",
+    "responsible_unit",
+    "location_type",
+    "street",
+    "postal_code",
+    "latitude",
+    "longitude",
+    "has_geocoding_error",
+    "borough_mismatch"
+   ],
+   "fct_information_contacts": [
+    "contact_sk",
+    "created_date_key",
+    "activity_key",
+    "contact_nature",
+    "created_at",
+    "original_channel",
+    "phone_contact_count",
+    "email_contact_count",
+    "in_person_contact_count",
+    "mail_contact_count",
+    "fax_contact_count",
+    "council_contact_count",
+    "mobile_app_contact_count",
+    "social_media_contact_count",
+    "website_contact_count",
+    "responsible_unit",
+    "is_exact_duplicate"
+   ],
+   "stg_311__contacts": [
+    "contact_sk",
+    "request_id",
+    "request_base_id",
+    "request_id_suffix",
+    "is_unexpected_id_prefix",
+    "contact_nature",
+    "activity_name",
+    "created_at",
+    "last_status_at",
+    "last_status",
+    "original_channel",
+    "phone_contact_count",
+    "email_contact_count",
+    "in_person_contact_count",
+    "mail_contact_count",
+    "fax_contact_count",
+    "council_contact_count",
+    "mobile_app_contact_count",
+    "social_media_contact_count",
+    "website_contact_count",
+    "responsible_unit",
+    "location_type",
+    "street",
+    "cross_street_1",
+    "cross_street_2",
+    "postal_code",
+    "borough",
+    "borough_geo",
+    "borough_mismatch",
+    "is_non_borough_value",
+    "longitude",
+    "latitude",
+    "mtm_x",
+    "mtm_y",
+    "has_geocoding_error",
+    "is_exact_duplicate"
+   ],
+   "status_mapping": [
+    "status",
+    "is_closed",
+    "closed_outcome"
+   ]
+  }
+ },
+ "filtered": [],
+ "proposals": [
+  {
+   "column": "created_date_key",
+   "test_type": "not_null",
+   "config": {},
+   "rationale": "Every request has a creation time, so the date key must be present.",
+   "evidence": "null_pct=0.0; created_at null_pct=0.0",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "created_date_key",
+   "test_type": "relationships",
+   "config": {
+    "to": "ref('dim_date')",
+    "field": "date_key"
+   },
+   "rationale": "FK to dim_date per yml description.",
+   "evidence": "yml: Foreign key to dim_date for the creation date; range 20220101-20261010",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "last_status_date_key",
+   "test_type": "not_null",
+   "config": {},
+   "rationale": "Last status date is always populated.",
+   "evidence": "null_pct=0.0",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "last_status_date_key",
+   "test_type": "relationships",
+   "config": {
+    "to": "ref('dim_date')",
+    "field": "date_key"
+   },
+   "rationale": "FK to dim_date.",
+   "evidence": "yml: Foreign key to dim_date for the last status date",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "activity_key",
+   "test_type": "not_null",
+   "config": {},
+   "rationale": "Missing activities are routed to Unknown member via coalesce.",
+   "evidence": "null_pct=0.0; SQL coalesce with unknown_key",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "activity_key",
+   "test_type": "relationships",
+   "config": {
+    "to": "ref('dim_activity')",
+    "field": "activity_key"
+   },
+   "rationale": "FK to dim_activity.",
+   "evidence": "yml: Foreign key to dim_activity",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "responsible_borough_key",
+   "test_type": "not_null",
+   "config": {},
+   "rationale": "Coalesced to Unknown member.",
+   "evidence": "null_pct=0.0; SQL coalesce",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "responsible_borough_key",
+   "test_type": "relationships",
+   "config": {
+    "to": "ref('dim_borough')",
+    "field": "borough_key"
+   },
+   "rationale": "FK to dim_borough.",
+   "evidence": "yml: Foreign key to dim_borough",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "location_borough_key",
+   "test_type": "not_null",
+   "config": {},
+   "rationale": "Coalesced to Unknown member.",
+   "evidence": "null_pct=0.0; SQL coalesce",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "location_borough_key",
+   "test_type": "relationships",
+   "config": {
+    "to": "ref('dim_borough')",
+    "field": "borough_key"
+   },
+   "rationale": "Role-playing FK to dim_borough.",
+   "evidence": "yml: Foreign key to dim_borough from geocoded borough",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "contact_nature",
+   "test_type": "accepted_values",
+   "config": {
+    "values": [
+     "Requete",
+     "Plainte",
+     "Commentaire"
+    ]
+   },
+   "rationale": "Documented set of natures.",
+   "evidence": "values_complete=true; yml: Requete, Plainte or Commentaire",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "last_status",
+   "test_type": "accepted_values",
+   "config": {
+    "values": [
+     "Terminée",
+     "Refusée",
+     "Prise en charge",
+     "Annulée",
+     "Transmise pour traitement",
+     "Acceptée",
+     "Supprimée",
+     "Réactivée",
+     "Urgente"
+    ]
+   },
+   "rationale": "Closed set of statuses.",
+   "evidence": "values_complete=true, 9 distinct values",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "closed_outcome",
+   "test_type": "accepted_values",
+   "config": {
+    "values": [
+     "completed",
+     "refused",
+     "cancelled",
+     "deleted"
+    ]
+   },
+   "rationale": "Documented outcomes.",
+   "evidence": "values_complete=true; yml lists four values",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "location_type",
+   "test_type": "accepted_values",
+   "config": {
+    "values": [
+     "Adresse",
+     "Intersection",
+     "Troncon",
+     "Installation"
+    ]
+   },
+   "rationale": "Documented location types.",
+   "evidence": "values_complete=true; yml lists four values",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "request_id_suffix",
+   "test_type": "accepted_values",
+   "config": {
+    "values": [
+     "A",
+     "B"
+    ]
+   },
+   "rationale": "Suffix is only A or B.",
+   "evidence": "values_complete=true; yml '-A'/'-B'",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "is_closed",
+   "test_type": "not_null",
+   "config": {},
+   "rationale": "Closed flag must always be defined.",
+   "evidence": "null_pct=0.0",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "closed_outcome",
+   "test_type": "singular_sql",
+   "config": {
+    "slug": "closed_outcome_consistent_with_is_closed",
+    "sql": "select request_id from {{ ref('fct_service_requests') }} where (is_closed and (closed_outcome is null or resolution_days is null)) or (not is_closed and (closed_outcome is not null or resolution_days is not null))"
+   },
+   "rationale": "closed_outcome and resolution_days are populated only for closed requests.",
+   "evidence": "null_pct=2.479 for both columns equals is_closed=false share (43541/1756293); yml: null while open",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "resolution_days",
+   "test_type": "singular_sql",
+   "config": {
+    "slug": "resolution_days_non_negative",
+    "sql": "select request_id from {{ ref('fct_service_requests') }} where resolution_days < 0"
+   },
+   "rationale": "Resolution time cannot be negative.",
+   "evidence": "min=0.0",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": null,
+   "test_type": "singular_sql",
+   "config": {
+    "slug": "last_status_not_before_created",
+    "sql": "select request_id from {{ ref('fct_service_requests') }} where last_status_at < created_at"
+   },
+   "rationale": "Last status cannot precede creation.",
+   "evidence": "resolution_days min=0.0; yml: fractional days from creation to last status",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": null,
+   "test_type": "singular_sql",
+   "config": {
+    "slug": "contact_counts_non_negative",
+    "sql": "select request_id from {{ ref('fct_service_requests') }} where phone_contact_count < 0 or email_contact_count < 0 or in_person_contact_count < 0 or mail_contact_count < 0 or fax_contact_count < 0 or council_contact_count < 0 or mobile_app_contact_count < 0 or social_media_contact_count < 0 or website_contact_count < 0"
+   },
+   "rationale": "Contact counts are non-negative.",
+   "evidence": "all count columns min=0",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": null,
+   "test_type": "singular_sql",
+   "config": {
+    "slug": "borough_mismatch_requires_different_keys",
+    "sql": "select request_id from {{ ref('fct_service_requests') }} where borough_mismatch and responsible_borough_key = location_borough_key"
+   },
+   "rationale": "A mismatch implies the two borough keys differ.",
+   "evidence": "yml: True when recorded and geocoded boroughs both present and differ",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  }
+ ]
+}

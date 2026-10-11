@@ -2,8 +2,10 @@
 data/
 *.duckdb
 *.duckdb.wal
-target/
-logs/
+/target/
+/montreal_311/target/
+/logs/
+/montreal_311/logs/
 dbt_packages/
 __pycache__/
 *.pyc
