@@ -1,4 +1,4 @@
-{{ config(materialized='view') }}
+{{ config(materialized='table') }}  {# table, not view: md5 and window functions over 3.2M rows would be recomputed by every downstream query #}
 
 -- Staging model: 1:1 with raw.requetes311 (no rows removed).
 -- Renames French columns to English, casts types, normalizes text, and adds

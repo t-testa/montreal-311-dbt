@@ -29,7 +29,7 @@ requests, how long do requests take to close, and how does that vary by borough 
 | Layer | Materialization | Purpose |
 |-------|-----------------|---------|
 | raw | table (Python load) | Untouched source data, all `VARCHAR` |
-| staging | view | 1:1 with source, typed and cleaned |
+| staging | table | 1:1 with source, typed and cleaned (table because hashing 3.2M rows is costly to recompute) |
 | intermediate | view | Joins and derived business logic |
 | marts | table | Consumption-ready models |
 
