@@ -1,0 +1,169 @@
+version: 2
+
+models:
+  - name: dim_date
+    description: Calendar dimension, one row per day from the earliest to the latest date in the data. Generated in SQL.
+    columns:
+      - name: date_key
+        description: Integer yyyymmdd (primary key).
+        data_tests: [unique, not_null]
+      - name: date_day
+        description: The calendar date.
+      - name: year
+        description: Calendar year.
+      - name: quarter
+        description: Calendar quarter, 1-4.
+      - name: month
+        description: Month number, 1-12.
+      - name: month_name
+        description: English month name.
+      - name: day_of_month
+        description: Day of the month.
+      - name: day_of_week
+        description: ISO day of week, 1 = Monday to 7 = Sunday.
+      - name: day_name
+        description: English weekday name.
+      - name: is_weekend
+        description: True for Saturday and Sunday.
+      - name: week_start_date
+        description: Monday of the week containing the date.
+
+  - name: dim_borough
+    description: >
+      One row per normalized borough value found in either borough column, plus an Unknown
+      member. Role-playing dimension joined twice by fct_service_requests.
+    columns:
+      - name: borough_key
+        description: Surrogate key, md5 of the borough name (primary key). The Unknown member has a reserved key.
+        data_tests: [unique, not_null]
+      - name: borough_name
+        description: Borough or municipality name in 'A-B' format, or 'Unknown'.
+      - name: is_non_borough_value
+        description: True for placeholder values that are not real boroughs (Ville de Montréal, Extérieur de Montréal).
+      - name: is_unknown_member
+        description: True only for the Unknown row, which facts point at when a borough is missing.
+
+  - name: dim_activity
+    description: >
+      One row per activity (source ACTI_NOM), plus an Unknown member for missing names. Carries
+      no nature or location-type columns because an activity occurs under several natures.
+    columns:
+      - name: activity_key
+        description: Surrogate key, md5 of the activity name (primary key).
+        data_tests: [unique, not_null]
+      - name: activity_name
+        description: Activity name (French), or 'Unknown'.
+      - name: is_unknown_member
+        description: True only for the Unknown row.
+
+  - name: fct_service_requests
+    description: Requests, complaints and comments. Grain is one row per request_id.
+    columns:
+      - name: request_id
+        description: Request identifier (primary key).
+        data_tests: [unique, not_null]
+      - name: created_date_key
+        description: Foreign key to dim_date for the creation date.
+      - name: last_status_date_key
+        description: Foreign key to dim_date for the last status date.
+      - name: activity_key
+        description: Foreign key to dim_activity. Points at the Unknown member when the activity is missing.
+      - name: responsible_borough_key
+        description: Foreign key to dim_borough from the recorded borough (source ARRONDISSEMENT). Unknown member when missing.
+      - name: location_borough_key
+        description: Foreign key to dim_borough from the geocoded borough (source ARRONDISSEMENT_GEO). Unknown member when missing.
+      - name: request_base_id
+        description: request_id without its '-A'/'-B' suffix.
+      - name: request_id_suffix
+        description: Letter suffix of request_id, or null.
+      - name: is_unexpected_id_prefix
+        description: True when request_id starts with '20-' or '21-'.
+      - name: contact_nature
+        description: Requete, Plainte or Commentaire.
+      - name: created_at
+        description: Creation time, Montreal local time.
+      - name: last_status
+        description: Most recent status (French).
+      - name: last_status_at
+        description: Time of the most recent status change, Montreal local time.
+      - name: is_closed
+        description: True when the status is terminal per the status_mapping seed.
+      - name: closed_outcome
+        description: completed, refused, cancelled or deleted; null while open.
+      - name: resolution_days
+        description: Fractional days from creation to last status, only for closed requests (last_status_at is a proxy for close time).
+      - name: original_channel
+        description: Channel the request first arrived through.
+      - name: phone_contact_count
+        description: Times reported by telephone.
+      - name: email_contact_count
+        description: Times reported by email.
+      - name: in_person_contact_count
+        description: Times reported in person.
+      - name: mail_contact_count
+        description: Times reported by postal mail.
+      - name: fax_contact_count
+        description: Times reported by fax.
+      - name: council_contact_count
+        description: Times reported through a municipal body or council.
+      - name: mobile_app_contact_count
+        description: Times reported through the mobile app.
+      - name: social_media_contact_count
+        description: Times reported through social media.
+      - name: website_contact_count
+        description: Times reported through the website.
+      - name: responsible_unit
+        description: Responsible organizational unit as text; deliberately not joined to dim_borough.
+      - name: location_type
+        description: Adresse, Intersection, Troncon or Installation.
+      - name: street
+        description: Street name of the location.
+      - name: postal_code
+        description: Postal code, uppercase, no spaces.
+      - name: latitude
+        description: WGS84 latitude.
+      - name: longitude
+        description: WGS84 longitude.
+      - name: has_geocoding_error
+        description: True when the city flagged a geocoding error.
+      - name: borough_mismatch
+        description: True when the recorded and geocoded boroughs are both present and differ.
+
+  - name: fct_information_contacts
+    description: Information calls with no request_id. Grain is one row per contact_sk.
+    columns:
+      - name: contact_sk
+        description: Surrogate key (primary key).
+        data_tests: [unique, not_null]
+      - name: created_date_key
+        description: Foreign key to dim_date for the call date.
+      - name: activity_key
+        description: Foreign key to dim_activity. Unknown member when missing.
+      - name: contact_nature
+        description: Always 'Information'.
+      - name: created_at
+        description: Call time, Montreal local time.
+      - name: original_channel
+        description: Channel the contact arrived through.
+      - name: phone_contact_count
+        description: Times reported by telephone.
+      - name: email_contact_count
+        description: Times reported by email.
+      - name: in_person_contact_count
+        description: Times reported in person.
+      - name: mail_contact_count
+        description: Times reported by postal mail.
+      - name: fax_contact_count
+        description: Times reported by fax.
+      - name: council_contact_count
+        description: Times reported through a municipal body or council.
+      - name: mobile_app_contact_count
+        description: Times reported through the mobile app.
+      - name: social_media_contact_count
+        description: Times reported through social media.
+      - name: website_contact_count
+        description: Times reported through the website.
+      - name: responsible_unit
+        description: Responsible organizational unit (text).
+      - name: is_exact_duplicate
+        description: True when the row has identical copies across every source column.

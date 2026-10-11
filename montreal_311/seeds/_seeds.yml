@@ -1,0 +1,29 @@
+version: 2
+
+seeds:
+  - name: status_mapping
+    description: >
+      Maps every 311 `last_status` value (French, as published) to whether the request is
+      closed and, if so, how. The single source of truth for open/closed logic: models join to
+      this seed instead of hard-coding a CASE statement. A status that is missing here fails
+      the relationships test on stg_311__contacts.last_status, so a new status in the source
+      stops the build rather than silently counting as open.
+      ASSUMPTION: `Acceptée` is mapped as OPEN. The source does not document the status.
+      It could mean "accepted for handling" (open) or "accepted as final" (closed). Rows
+      with this status average ~29 days since creation and none are untouched, which looks like
+      a working state, so it is treated as open. Revisit if the city clarifies. Other statuses
+      are inferred from their names: Terminée/Refusée/Annulée/Supprimée are terminal;
+      Prise en charge/Transmise pour traitement/Urgente are in progress; Réactivée means
+      reopened.
+    config:
+      column_types:
+        status: varchar
+        is_closed: boolean
+        closed_outcome: varchar
+    columns:
+      - name: status
+        description: Status value exactly as it appears in the source DERNIER_STATUT column.
+      - name: is_closed
+        description: True when the status is terminal for the request.
+      - name: closed_outcome
+        description: How a closed request ended - completed, refused, cancelled or deleted. Null while open.

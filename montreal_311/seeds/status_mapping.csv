@@ -1,0 +1,10 @@
+status,is_closed,closed_outcome
+Terminée,true,completed
+Refusée,true,refused
+Annulée,true,cancelled
+Supprimée,true,deleted
+Acceptée,false,
+Prise en charge,false,
+Transmise pour traitement,false,
+Urgente,false,
+Réactivée,false,

@@ -51,6 +51,14 @@ models:
         description: When the status last changed (source DATE_DERNIER_STATUT). Montreal local time, no timezone. Equals created_at for contacts never updated.
       - name: last_status
         description: Most recent status of the contact, French text (e.g. Terminée, Refusée, Prise en charge). Null for 'Information' contacts.
+        data_tests:
+          # Every status in the data must exist in the status_mapping seed. A new, unmapped
+          # status fails here, so it cannot silently be treated as open downstream.
+          # (relationships ignores nulls, so Information contacts are fine.)
+          - relationships:
+              arguments:
+                to: ref('status_mapping')
+                field: status
       - name: original_channel
         description: Channel through which the contact originally arrived (source PROVENANCE_ORIGINALE), e.g. Téléphone, Mobile, Courriel.
       - name: phone_contact_count

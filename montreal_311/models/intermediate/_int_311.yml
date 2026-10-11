@@ -1,0 +1,121 @@
+version: 2
+
+models:
+  - name: int_311__service_requests
+    description: >
+      Contacts that have a request_id (requests, complaints, comments), one row per request_id.
+      Adds open/closed logic by joining the status_mapping seed. Closed requests get
+      resolution_days; open ones get null.
+    columns:
+      - name: request_id
+        description: Request identifier (primary key).
+        data_tests: [unique, not_null]
+      - name: request_base_id
+        description: request_id without its trailing '-A'/'-B' suffix. Several request_ids can share one base id.
+      - name: request_id_suffix
+        description: Letter suffix of request_id, or null.
+      - name: is_unexpected_id_prefix
+        description: True when request_id starts with '20-' or '21-' although all data is from 2022 or later.
+      - name: contact_nature
+        description: Requete, Plainte or Commentaire (Information contacts have no request_id and live in int_311__information_contacts).
+      - name: activity_name
+        description: Service or topic of the request (French).
+      - name: created_at
+        description: Creation time, Montreal local time, no timezone.
+      - name: last_status
+        description: Most recent status, French text as published.
+      - name: last_status_at
+        description: Time of the most recent status change, Montreal local time.
+      - name: is_closed
+        description: True when last_status is terminal, per the status_mapping seed. Null only if the status is missing from the seed.
+      - name: closed_outcome
+        description: completed, refused, cancelled or deleted for closed requests; null while open.
+      - name: resolution_days
+        description: >
+          Fractional days from created_at to last_status_at, only for closed requests. The source
+          has no close timestamp, so last_status_at is used as a proxy. For refused, cancelled and
+          deleted outcomes this is time to closure, not time to a successful resolution.
+      - name: original_channel
+        description: Channel through which the request first arrived.
+      - name: phone_contact_count
+        description: Times reported by telephone.
+      - name: email_contact_count
+        description: Times reported by email.
+      - name: in_person_contact_count
+        description: Times reported in person.
+      - name: mail_contact_count
+        description: Times reported by postal mail.
+      - name: fax_contact_count
+        description: Times reported by fax.
+      - name: council_contact_count
+        description: Times reported through a municipal body or council.
+      - name: mobile_app_contact_count
+        description: Times reported through the mobile app.
+      - name: social_media_contact_count
+        description: Times reported through social media.
+      - name: website_contact_count
+        description: Times reported through the website.
+      - name: responsible_unit
+        description: Organizational unit responsible for the request (text; 52 values, not all boroughs).
+      - name: location_type
+        description: Adresse, Intersection, Troncon or Installation.
+      - name: street
+        description: Street name of the location.
+      - name: cross_street_1
+        description: First cross street for intersections.
+      - name: cross_street_2
+        description: Second cross street for intersections.
+      - name: postal_code
+        description: Postal code, uppercase, no spaces.
+      - name: borough
+        description: Borough recorded on the request, normalized to 'A-B' format. Null on a handful of rows.
+      - name: borough_geo
+        description: Borough derived from the geocoded coordinates, same format. Null when the request could not be geocoded.
+      - name: borough_mismatch
+        description: True when borough and borough_geo are both present and differ.
+      - name: longitude
+        description: WGS84 longitude.
+      - name: latitude
+        description: WGS84 latitude.
+      - name: has_geocoding_error
+        description: True when the city flagged a geocoding error.
+
+  - name: int_311__information_contacts
+    description: >
+      Information calls (no request_id), one row per contact_sk. Exact duplicates keep their own
+      rows and are flagged. Status, location and borough are always empty for these rows and
+      are not carried.
+    columns:
+      - name: contact_sk
+        description: Surrogate key from the staging model (primary key).
+        data_tests: [unique, not_null]
+      - name: contact_nature
+        description: Always 'Information'.
+      - name: activity_name
+        description: Service or topic the caller asked about (French).
+      - name: created_at
+        description: Call time, Montreal local time, no timezone.
+      - name: original_channel
+        description: Channel through which the contact arrived.
+      - name: phone_contact_count
+        description: Times reported by telephone.
+      - name: email_contact_count
+        description: Times reported by email.
+      - name: in_person_contact_count
+        description: Times reported in person.
+      - name: mail_contact_count
+        description: Times reported by postal mail.
+      - name: fax_contact_count
+        description: Times reported by fax.
+      - name: council_contact_count
+        description: Times reported through a municipal body or council.
+      - name: mobile_app_contact_count
+        description: Times reported through the mobile app.
+      - name: social_media_contact_count
+        description: Times reported through social media.
+      - name: website_contact_count
+        description: Times reported through the website.
+      - name: responsible_unit
+        description: Organizational unit responsible (text).
+      - name: is_exact_duplicate
+        description: True when the row has identical copies across every source column.
