@@ -64,14 +64,44 @@ models:
         data_tests: [unique, not_null]
       - name: created_date_key
         description: Foreign key to dim_date for the creation date.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: "ref('dim_date')"
+                field: "date_key"
       - name: last_status_date_key
         description: Foreign key to dim_date for the last status date.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: "ref('dim_date')"
+                field: "date_key"
       - name: activity_key
         description: Foreign key to dim_activity. Points at the Unknown member when the activity is missing.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: "ref('dim_activity')"
+                field: "activity_key"
       - name: responsible_borough_key
         description: Foreign key to dim_borough from the recorded borough (source ARRONDISSEMENT). Unknown member when missing.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: "ref('dim_borough')"
+                field: "borough_key"
       - name: location_borough_key
         description: Foreign key to dim_borough from the geocoded borough (source ARRONDISSEMENT_GEO). Unknown member when missing.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: "ref('dim_borough')"
+                field: "borough_key"
       - name: request_base_id
         description: request_id without its '-A'/'-B' suffix.
       - name: request_id_suffix
@@ -80,6 +110,10 @@ models:
         description: True when request_id starts with '20-' or '21-'.
       - name: contact_nature
         description: Requete, Plainte or Commentaire.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Requete", "Plainte", "Commentaire"]
       - name: created_at
         description: Creation time, Montreal local time.
       - name: last_status
@@ -88,8 +122,14 @@ models:
         description: Time of the most recent status change, Montreal local time.
       - name: is_closed
         description: True when the status is terminal per the status_mapping seed.
+        data_tests:
+          - not_null
       - name: closed_outcome
         description: completed, refused, cancelled or deleted; null while open.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["completed", "refused", "cancelled", "deleted"]
       - name: resolution_days
         description: Fractional days from creation to last status, only for closed requests (last_status_at is a proxy for close time).
       - name: original_channel
@@ -116,6 +156,10 @@ models:
         description: Responsible organizational unit as text; deliberately not joined to dim_borough.
       - name: location_type
         description: Adresse, Intersection, Troncon or Installation.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Adresse", "Intersection", "Troncon", "Installation"]
       - name: street
         description: Street name of the location.
       - name: postal_code

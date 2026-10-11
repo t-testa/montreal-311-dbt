@@ -79,7 +79,34 @@ _TODO: summary of tests and docs._
 
 ## AI agent for tests and docs
 
-_TODO: design, prompts, evaluation of proposed tests/docs._
+`ai/propose_tests.py` proposes dbt tests for a model, proves them against the data, and lets a
+human decide.
+
+```powershell
+copy .env.example .env        # then add ANTHROPIC_API_KEY
+python ai/propose_tests.py fct_service_requests --propose-only   # propose + validate, no writes
+python ai/propose_tests.py fct_service_requests --review         # interactive y/n review
+```
+
+1. **Profile**: per-column aggregates from DuckDB (type, null %, distinct count, min/max,
+   string lengths, top 10 values for low-cardinality columns).
+2. **Propose**: the LLM (`ANTHROPIC_MODEL`, default `claude-sonnet-5-5`) receives the model SQL,
+   its yml, the profile and the existing tests, and returns structured JSON: column, test type
+   (`not_null`, `unique`, `accepted_values`, `relationships` or a singular SQL test), config,
+   rationale and evidence.
+3. **Validate**: every proposal runs as a real `dbt test` in a throwaway dbt project, so each
+   one has a pass/fail result and failing row count before you see it.
+4. **Review**: you approve (`y`), reject (`n`) or, for failing tests, add as `severity: warn`
+   (`w`). Approved generic tests are written into the model's yml; approved singular tests are
+   written to `montreal_311/tests/`. SQL models are never edited.
+5. **Log**: every proposal, result and decision is appended to `ai/logs/decisions.jsonl`, and each
+   run's full proposal list and exact LLM payload is saved in `ai/logs/proposals/`. These are
+   committed as evaluation evidence.
+
+**Privacy:** only aggregate statistics are sent to the LLM, never raw rows. The data contains
+street addresses and postal codes, so columns with sensitive-looking names and all
+high-cardinality columns never get value lists. The exact payload for each run is saved so it
+can be audited.
 
 ## Data source
 
