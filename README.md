@@ -57,6 +57,22 @@ flowchart LR
 
 A long tail of slow requests drags the mean far above the typical case. 43,541 requests are still open.
 
+**Where completed requests take longest.** The five slowest boroughs by median days to completion
+(recorded borough; at least 1,000 completed requests; the overall median is 4.7 days):
+
+| Borough | Completed requests | Median days |
+|---|---:|---:|
+| L'Île-Bizard-Sainte-Geneviève | 22,375 | 13.8 |
+| Lachine | 44,764 | 12.0 |
+| LaSalle | 45,393 | 8.9 |
+| Saint-Léonard | 46,355 | 7.3 |
+| Verdun | 61,588 | 7.0 |
+
+The fastest, Ville-Marie, is at 2.1 days, so medians differ by more than 6x across boroughs. This
+says where completion times are longer, not why: borough differences could reflect the mix of
+request types, how each borough records status updates, or service levels, and this analysis
+controls for none of them.
+
 **AI test writer experiment** ([full write-up](docs/ai_test_writer_eval.md)). Question: can the agent find the data quality issues already known to exist in staging? Scored against 5 issues still live in `stg_311__contacts`.
 
 | Prompt | Runs | Live issues caught (of 5) | Notes |
@@ -69,26 +85,47 @@ Takeaways: a single generic prompt rule moved detection from 0 to 4 of 5 and was
 
 ## How to run
 
-Requires Python 3.11+.
+Requires Python 3.11+. Commands are shown for PowerShell (Windows) and bash (macOS/Linux/Git Bash).
 
 ```powershell
+# PowerShell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+```bash
+# bash
+python -m venv .venv
+source .venv/bin/activate        # Git Bash on Windows: source .venv/Scripts/activate
 pip install -r requirements.txt
 ```
 
 **Quick start, no download (committed 5,682-row sample, ~1.4 MB).** Also what CI runs.
 
 ```powershell
+# PowerShell
 $env:MONTREAL_311_DB = "$PWD\data\montreal_311_sample.duckdb"
+```
+
+```bash
+# bash
+export MONTREAL_311_DB="$PWD/data/montreal_311_sample.duckdb"   # Git Bash on Windows: "$(pwd -W)/data/..."
+```
+
+Then, in either shell:
+
+```
 python ingestion/load_311.py --sample
 cd montreal_311
 dbt build --profiles-dir .
 ```
 
+(`MONTREAL_311_DB` must be set in the shell that runs dbt. Unset it to go back to the full database.)
+
 **Full data (downloads ~840 MB, produces a ~0.8 GB DuckDB file).**
 
-```powershell
+```
 python ingestion/load_311.py          # download + load raw.requetes311
 python profiling/profile_raw.py       # regenerates docs/profiling.md
 cd montreal_311
@@ -99,7 +136,7 @@ The sample is stratified on purpose (all 3 unexpected-prefix IDs, duplicate pair
 
 **AI test writer** (needs `ANTHROPIC_API_KEY` in `.env`, see `.env.example`; not run in CI):
 
-```powershell
+```
 python ai/propose_tests.py stg_311__contacts --propose-only   # propose + validate, writes nothing
 python ai/propose_tests.py stg_311__contacts --review         # interactive y/n, logs every decision
 python ai/evals/score.py ai/logs/proposals/<run>.json         # score a run against known issues
@@ -113,6 +150,12 @@ python ai/evals/score.py ai/logs/proposals/<run>.json         # score a run agai
 - **`Acceptée` is an assumption:** it is mapped as open because the status is undocumented (see the seed docs).
 - **Scoring rules are mine:** "caught" is defined in `ai/evals/known_issues.yml`; a test that catches an issue is not necessarily one I would approve.
 - **Information calls have no key.** About 45% of rows have no `request_id` and are identified only by a generated surrogate key.
+
+## What I'd do next
+
+- **Incremental `fct_service_requests`:** the source refreshes daily, so merge new and changed requests on `request_id` instead of rebuilding 1.7M rows each run.
+- **dbt source freshness on `raw.requetes311`:** alert when the load is stale, using the load timestamp the ingestion script already records.
+- **Target the shared-base-ID gap:** add an eval issue and a profile statistic aimed at request IDs that share a base ID across `-A`/`-B` suffixes, the one known issue no prompt version caught.
 
 ## Repository layout
 
@@ -129,3 +172,7 @@ docs/           data profile and AI test writer evaluation
 
 Contains data from Ville de Montréal, Demandes de services citoyennes (Requêtes 311), licensed
 under CC-BY 4.0. Source: [donnees.montreal.ca/dataset/requete-311](https://donnees.montreal.ca/dataset/requete-311).
+
+## Author
+
+Tony Testa: [github.com/t-testa](https://github.com/t-testa) · [linkedin.com/in/tony-testa-ai](https://www.linkedin.com/in/tony-testa-ai)
