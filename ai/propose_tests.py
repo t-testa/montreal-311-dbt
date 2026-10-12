@@ -36,7 +36,7 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
 DBT_DIR = ROOT / "montreal_311"
-DB_PATH = ROOT / "data" / "montreal_311.duckdb"
+DB_PATH = Path(os.environ.get("MONTREAL_311_DB", ROOT / "data" / "montreal_311.duckdb"))
 LOG_DIR = ROOT / "ai" / "logs"
 PROPOSALS_DIR = LOG_DIR / "proposals"
 DECISIONS_LOG = LOG_DIR / "decisions.jsonl"

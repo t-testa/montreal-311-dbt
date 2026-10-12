@@ -2,12 +2,13 @@
 
 Usage:  python profiling/profile_raw.py
 """
+import os
 from pathlib import Path
 
 import duckdb
 
 ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = ROOT / "data" / "montreal_311.duckdb"
+DB_PATH = Path(os.environ.get("MONTREAL_311_DB", ROOT / "data" / "montreal_311.duckdb"))
 OUT = ROOT / "docs" / "profiling.md"
 TABLE = "raw.requetes311"
 

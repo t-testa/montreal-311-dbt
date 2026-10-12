@@ -1,0 +1,34 @@
+name: dbt
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # The sample goes to its own DuckDB file; dbt reads the same path via profiles.yml.
+      MONTREAL_311_DB: ${{ github.workspace }}/data/montreal_311_sample.duckdb
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Load the committed sample (no 840 MB download)
+        run: python ingestion/load_311.py --sample
+
+      # `dbt build` exits 0 when tests only warn, so the monitors (severity: warn) do not fail
+      # the job; any error-severity test failure does. The AI test writer is deliberately not run
+      # here: it needs an API key and its output is non-deterministic.
+      - name: dbt build
+        working-directory: montreal_311
+        run: dbt build --profiles-dir .

@@ -3,7 +3,8 @@ montreal_311:
   outputs:
     dev:
       type: duckdb
-      # Resolved relative to where dbt is run (montreal_311/).
-      path: ../data/montreal_311.duckdb
+      # Relative paths resolve from where dbt is run (montreal_311/). Set MONTREAL_311_DB
+      # (absolute path) to point at another file, e.g. the sample database used in CI.
+      path: "{{ env_var('MONTREAL_311_DB', '../data/montreal_311.duckdb') }}"
       schema: main
       threads: 4
