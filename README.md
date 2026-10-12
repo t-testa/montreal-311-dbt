@@ -10,26 +10,27 @@ experiment on whether an AI agent can find known data quality problems on its ow
 
 ## Architecture
 
+**The dbt pipeline**
+
 ```mermaid
-flowchart LR
-    CSV[("311 open data CSV<br/>3.2M rows")] -->|"load_311.py, all text"| RAW["raw.requetes311"]
-    RAW --> STG["staging<br/>stg_311__contacts (table)"]
-    STG --> INT["intermediate (views)<br/>service_requests<br/>information_contacts"]
-    SEED["status_mapping seed"] --> INT
-    INT --> MARTS["marts (tables)<br/>2 facts, 3 dimensions"]
+flowchart TD
+    CSV[("311 open data CSV")] -->|"load_311.py"| RAW["raw.requetes311<br/>all text"]
+    RAW --> STG["staging<br/>stg_311__contacts"]
+    STG --> INT["intermediate<br/>2 views"]
+    SEED["status_mapping<br/>seed"] --> INT
+    INT --> MARTS["marts<br/>2 facts, 3 dimensions"]
+```
 
-    subgraph AI["AI test writer (human in the loop)"]
-        direction TB
-        P["1. Profile: aggregates only,<br/>never raw rows"] --> L["2. LLM proposes tests"]
-        L --> V["3. Validate: run each as a real<br/>dbt test in a scratch project"]
-        V --> R["4. Human review<br/>failing tests default to warn"]
-    end
+**The AI test writer loop**
 
-    STG -.-> P
-    MARTS -.-> P
-    R -->|"approved tests + decision log"| T["yml tests, tests/*.sql,<br/>ai/logs/decisions.jsonl"]
-    T -.-> STG
-    T -.-> MARTS
+```mermaid
+flowchart TD
+    P["1. Profile<br/>aggregates only"] --> L["2. LLM proposes tests"]
+    L --> V["3. Validate<br/>real dbt test run"]
+    V --> R["4. Human review<br/>failures default to warn"]
+    R --> T["5. Approved tests<br/>+ decision log"]
+    T -.->|"next dbt build"| M["staging and marts"]
+    M -.-> P
 ```
 
 ## Key design decisions
@@ -172,6 +173,10 @@ docs/           data profile and AI test writer evaluation
 
 Contains data from Ville de Montréal, Demandes de services citoyennes (Requêtes 311), licensed
 under CC-BY 4.0. Source: [donnees.montreal.ca/dataset/requete-311](https://donnees.montreal.ca/dataset/requete-311).
+
+## How this was built
+
+Built with Claude Code as a pair programmer. Design decisions, data modelling choices, test approvals and the evaluation design are mine; every AI-proposed test was reviewed by hand, with decisions logged in `ai/logs/decisions.jsonl`.
 
 ## Author
 
