@@ -1,0 +1,70 @@
+# Ground truth for scoring the AI test writer on stg_311__contacts.
+# Source: the data quality issues found in phase 1 profiling (docs/profiling.md).
+#
+# A proposal CATCHES an issue when it satisfies at least one `detect` clause. Clause fields
+# (all that are present must hold):
+#   references  - the proposal's column equals one of these identifiers, OR one appears as a whole
+#                 word in the test text (the SQL for singular tests, the JSON config otherwise)
+#   test_types  - proposal.test_type is one of these
+#   text_regex  - case-insensitive regex that must match the test text
+#   must_fail   - true: the proposal must FAIL when validated against the current data (it really
+#                 detects the defect). false: passing is fine (used where staging already fixes the
+#                 defect, so a correct test can only act as a regression guard).
+# Fields within a clause are ANDed; a proposal catches an issue if ANY clause matches (clauses are ORed).
+# Merely touching a column with a test that passes does NOT count when must_fail is true.
+
+model: stg_311__contacts
+
+issues:
+  - id: exact_duplicates
+    description: 713 pairs of rows are identical in every source column (1,426 rows flagged is_exact_duplicate); they have no request_id.
+    still_present_in_staging: true
+    detect:
+      - references: [is_exact_duplicate]
+        must_fail: true
+
+  - id: borough_mismatch
+    description: Recorded borough and geocoded borough disagree on 11,974 rows (flagged borough_mismatch).
+    still_present_in_staging: true
+    detect:
+      - references: [borough_mismatch]
+        must_fail: true
+      - text_regex: 'borough\s*(<>|!=)\s*borough_geo|borough_geo\s*(<>|!=)\s*borough'
+        must_fail: true
+
+  - id: unexpected_id_prefix
+    description: 3 request_ids start with 20- or 21- although all contacts were created in 2022 or later (flagged is_unexpected_id_prefix).
+    still_present_in_staging: true
+    detect:
+      - references: [is_unexpected_id_prefix]
+        must_fail: true
+      - text_regex: "like\\s+'2[01]-|(left|substr|substring|split_part)\\s*\\(\\s*request_id"
+        must_fail: true
+
+  - id: suffixed_ids
+    description: 1,838 request_ids carry an -A/-B suffix, and 11 base IDs are shared by several suffixed request_ids.
+    still_present_in_staging: true
+    detect:
+      - references: [request_base_id, request_id_suffix]
+        must_fail: true
+
+  - id: non_borough_values
+    description: borough holds placeholders that are not boroughs (Ville de Montréal 1,392 rows, Extérieur de Montréal 3 rows; flagged is_non_borough_value).
+    still_present_in_staging: true
+    detect:
+      - references: [is_non_borough_value]
+        must_fail: true
+      - text_regex: 'Ville de Montr|Ext.rieur de Montr'
+        must_fail: true
+
+  - id: casing_whitespace_format
+    description: >
+      Inconsistent casing, whitespace or format in text columns (activity casing variants,
+      untrimmed street/activity names, a lowercase letter in a postal code). Staging already
+      normalizes these, so a correct test passes; it counts if it asserts normalized text.
+    still_present_in_staging: false
+    detect:
+      - references: [activity_name, street, cross_street_1, cross_street_2, postal_code, responsible_unit, borough, borough_geo]
+        test_types: [singular_sql, accepted_values]
+        text_regex: 'trim\s*\(|lower\s*\(|upper\s*\(|regexp_matches|\[A-Z\]'
+        must_fail: false

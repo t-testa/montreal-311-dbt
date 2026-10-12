@@ -1326,5 +1326,7 @@
     "message": ""
    }
   }
- ]
+ ],
+ "prompt_version": "v1",
+ "prompt_version_backfilled": true
 }

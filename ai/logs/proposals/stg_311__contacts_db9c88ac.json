@@ -1,0 +1,1281 @@
+{
+ "run_id": "db9c88ac",
+ "model": "stg_311__contacts",
+ "created": "2026-10-12T00:01:21.631005+00:00",
+ "llm_model": "claude-sonnet-5-5",
+ "prompt_version": "v2",
+ "system_prompt": "You are a careful analytics engineer proposing dbt data tests for ONE model.\n\nYou receive the model SQL, its yml (with column descriptions), aggregate-only column\nprofiles, the tests that already exist, and the other models you may reference.\n\nRules:\n- Allowed test types: not_null, unique, accepted_values, relationships, singular_sql. Nothing else.\n- Ground every proposal in evidence: cite the specific statistic (e.g. \"null_pct=0.0\",\n  \"all_distinct=true\", \"min=0\") and/or the yml description or SQL that implies the rule.\n- accepted_values: only for columns whose profile has values_complete=true; list EXACTLY those\n  values (same spelling, accents and case). Never invent values.\n- relationships: config {\"to\": \"ref('<model>')\", \"field\": \"<column>\"}, only to models and\n  columns listed in available_models.\n- singular_sql: config {\"slug\": \"short_snake_case_name\", \"sql\": \"...\"}. The SQL must be a\n  single SELECT (or WITH ... SELECT) that returns the rows that VIOLATE the rule, reads the model via\n  {{ ref('<this model>') }}, and has no semicolon. Use these for cross-column invariants.\n- Do not duplicate tests that already exist. Prefer a focused list of valuable tests over an\n  exhaustive one (aim for 8-20). Skip columns where a test would be trivial or meaningless.\n- You may propose a rule that the statistics cannot fully confirm if the descriptions or SQL\n  clearly imply it; every proposal is validated against the real data before a human sees it.\n- Set \"column\" to null for singular_sql tests that span columns.\n- Boolean flag columns whose true-count (or false-count) is small but non-zero relative to the row\n  count are known-defect indicators: the data producer is marking rows it knows are problematic.\n  For each such column, propose a monitoring test with \"severity\": \"warn\" that fails when flagged\n  rows exist, so the defect is tracked instead of silently ignored.\nReturn your answer ONLY by calling the submit_proposals tool.",
+ "usage": {
+  "input_tokens": 15475,
+  "output_tokens": 2433
+ },
+ "payload_sent": {
+  "model_name": "stg_311__contacts",
+  "model_sql": "{{ config(materialized='table') }}  {# table, not view: md5 and window functions over 3.2M rows would be recomputed by every downstream query #}\n\n-- Staging model: 1:1 with raw.requetes311 (no rows removed).\n-- Renames French columns to English, casts types, normalizes text, and adds\n-- row-level flags describing known data quality issues (see docs/profiling.md).\n\n{% set source_columns = adapter.get_columns_in_relation(source('raw', 'requetes311')) %}\n\nwith source as (\n\n    select * from {{ source('raw', 'requetes311') }}\n\n),\n\n-- Step 1: fingerprint every row using the RAW (untouched) values.\n-- md5() over all columns gives identical rows an identical hash.\n-- coalesce(..., '<null>') matters: concat_ws silently skips NULLs, which would let\n-- (a, NULL, b) and (a, b, NULL) collide. The '|' delimiter prevents ('ab','c') = ('a','bc').\nfingerprinted as (\n\n    select\n        *,\n        md5(concat_ws('|',\n            {%- for col in source_columns %}\n            coalesce(\"{{ col.name }}\", '<null>'){{ \",\" if not loop.last }}\n            {%- endfor %}\n        )) as row_hash\n    from source\n\n),\n\n-- Step 2: window functions over each group of identical rows.\n--   count(*) over (partition by row_hash)  -> size of the group (1 = not duplicated)\n--   row_number() over (partition by row_hash) -> 1, 2, 3... inside the group\n-- Window functions keep every row (unlike GROUP BY, which would collapse them).\n-- Rows in a group are identical, so the order within it is irrelevant: the set of\n-- (row_hash, row_number) pairs is the same on every run, which keeps the key deterministic.\nnumbered as (\n\n    select\n        *,\n        count(*)     over (partition by row_hash) as duplicate_group_size,\n        row_number() over (partition by row_hash order by row_hash) as duplicate_row_number\n    from fingerprinted\n\n),\n\ncleaned as (\n\n    select\n        -- Surrogate key: unique even for exact duplicates thanks to the row number.\n        md5(row_hash || '|' || duplicate_row_number::varchar) as contact_sk,\n\n        -- nullif(trim(x), ''): trim whitespace, and turn blank strings into real NULLs\n        -- so \"empty\" is represented one way only.\n        nullif(trim(\"ID_UNIQUE\"), '')                  as request_id,\n        nullif(trim(\"NATURE\"), '')                     as contact_nature,\n\n        -- Explicit casing fixes only; French text is never blanket-lower()ed because\n        -- that would break proper nouns (\"Île\", \"Saint-Laurent\"). Add new variants here.\n        case nullif(trim(\"ACTI_NOM\"), '')\n            when 'Soutien aux Élus' then 'Soutien aux élus'\n            when 'soutien aux élus' then 'Soutien aux élus'\n            else nullif(trim(\"ACTI_NOM\"), '')\n        end                                            as activity_name,\n\n        nullif(trim(\"TYPE_LIEU_INTERV\"), '')           as location_type,\n        nullif(trim(\"RUE\"), '')                        as street,\n        nullif(trim(\"RUE_INTERSECTION1\"), '')          as cross_street_1,\n        nullif(trim(\"RUE_INTERSECTION2\"), '')          as cross_street_2,\n\n        -- Source stores '0'/'1' as text; compare to '1' to get a true boolean.\n        (\"LOC_ERREUR_GDT\" = '1')                       as has_geocoding_error,\n\n        -- The two borough columns use different separators (\"A - B\" vs \"A-B\").\n        -- Standardize both to \"A-B\" so they can be compared and joined.\n        replace(nullif(trim(\"ARRONDISSEMENT\"), ''), ' - ', '-')     as borough,\n        replace(nullif(trim(\"ARRONDISSEMENT_GEO\"), ''), ' - ', '-') as borough_geo,\n\n        -- Postal codes: strip spaces, then uppercase ('H1Y2m5' -> 'H1Y2M5').\n        upper(replace(nullif(trim(\"LIN_CODE_POSTAL\"), ''), ' ', '')) as postal_code,\n\n        -- Source timestamps are ISO text with no timezone: America/Montreal local time.\n        -- TIMESTAMP (not TIMESTAMPTZ) keeps them as-is. A plain cast fails loudly on bad\n        -- values, which is what we want in staging.\n        cast(\"DDS_DATE_CREATION\" as timestamp)         as created_at,\n        cast(\"DATE_DERNIER_STATUT\" as timestamp)       as last_status_at,\n\n        nullif(trim(\"PROVENANCE_ORIGINALE\"), '')       as original_channel,\n\n        -- PROVENANCE_* look like 0/1 flags but hold counts (max 60): how many times the\n        -- same request was reported through each channel. Hence the *_contact_count names.\n        cast(\"PROVENANCE_TELEPHONE\" as integer)        as phone_contact_count,\n        cast(\"PROVENANCE_COURRIEL\" as integer)         as email_contact_count,\n        cast(\"PROVENANCE_PERSONNE\" as integer)         as in_person_contact_count,\n        cast(\"PROVENANCE_COURRIER\" as integer)         as mail_contact_count,\n        cast(\"PROVENANCE_TELECOPIEUR\" as integer)      as fax_contact_count,\n        cast(\"PROVENANCE_INSTANCE\" as integer)         as council_contact_count,\n        cast(\"PROVENANCE_MOBILE\" as integer)           as mobile_app_contact_count,\n        cast(\"PROVENANCE_MEDIASOCIAUX\" as integer)     as social_media_contact_count,\n        cast(\"PROVENANCE_SITEINTERNET\" as integer)     as website_contact_count,\n\n        nullif(trim(\"UNITE_RESP_PARENT\"), '')          as responsible_unit,\n\n        cast(\"LOC_LONG\" as double)                     as longitude,\n        cast(\"LOC_LAT\" as double)                      as latitude,\n        cast(\"LOC_X\" as double)                        as mtm_x,\n        cast(\"LOC_Y\" as double)                        as mtm_y,\n\n        nullif(trim(\"DERNIER_STATUT\"), '')             as last_status,\n\n        duplicate_group_size,\n        row_hash\n\n    from numbered\n\n),\n\nfinal as (\n\n    select\n        *,\n\n        -- Request ID anatomy: '22-105694-A' = year prefix, number, optional letter suffix.\n        -- regexp_replace removes a trailing '-<letter>'; the '$' anchors to end of string,\n        -- so '22-1' (a short ID, not a suffix) is left intact.\n        regexp_replace(request_id, '-[A-Z]$', '')      as request_base_id,\n\n        -- regexp_extract(..., group 1) returns just the captured letter, or '' if no match.\n        nullif(regexp_extract(request_id, '-([A-Z])$', 1), '') as request_id_suffix,\n\n        -- Data starts in 2022, so '20-'/'21-' prefixes are suspicious. coalesce(..., false):\n        -- a NULL request_id makes LIKE return NULL, but a flag should be strictly true/false.\n        coalesce(request_id like '20-%' or request_id like '21-%', false) as is_unexpected_id_prefix,\n\n        -- Borough columns disagree. Both must be present: comparing with NULL yields NULL,\n        -- and a missing value is not a \"mismatch\".\n        coalesce(borough is not null and borough_geo is not null and borough <> borough_geo, false)\n                                                       as borough_mismatch,\n\n        -- Placeholder values in the borough column that are not real boroughs.\n        coalesce(borough in ('Ville de Montréal', 'Extérieur de Montréal'), false)\n                                                       as is_non_borough_value,\n\n        duplicate_group_size > 1                       as is_exact_duplicate\n\n    from cleaned\n\n)\n\nselect\n    contact_sk,\n    request_id,\n    request_base_id,\n    request_id_suffix,\n    is_unexpected_id_prefix,\n    contact_nature,\n    activity_name,\n    created_at,\n    last_status_at,\n    last_status,\n    original_channel,\n    phone_contact_count,\n    email_contact_count,\n    in_person_contact_count,\n    mail_contact_count,\n    fax_contact_count,\n    council_contact_count,\n    mobile_app_contact_count,\n    social_media_contact_count,\n    website_contact_count,\n    responsible_unit,\n    location_type,\n    street,\n    cross_street_1,\n    cross_street_2,\n    postal_code,\n    borough,\n    borough_geo,\n    borough_mismatch,\n    is_non_borough_value,\n    longitude,\n    latitude,\n    mtm_x,\n    mtm_y,\n    has_geocoding_error,\n    is_exact_duplicate\nfrom final\n",
+  "model_yml": "version: 2\n\nmodels:\n  - name: stg_311__contacts\n    description: >\n      Staging view over raw.requetes311, 1:1 with the source (no rows removed). English\n      snake_case names, typed columns, trimmed text, standardized boroughs and postal codes,\n      and row-level data quality flags. All timestamps are Montreal local time\n      (America/Montreal) stored as TIMESTAMP without timezone.\n      Column mapping (source -> staging): ID_UNIQUE -> request_id; NATURE -> contact_nature;\n      ACTI_NOM -> activity_name; TYPE_LIEU_INTERV -> location_type; RUE -> street;\n      RUE_INTERSECTION1 -> cross_street_1; RUE_INTERSECTION2 -> cross_street_2;\n      LOC_ERREUR_GDT -> has_geocoding_error; ARRONDISSEMENT -> borough;\n      ARRONDISSEMENT_GEO -> borough_geo; LIN_CODE_POSTAL -> postal_code;\n      DDS_DATE_CREATION -> created_at; PROVENANCE_ORIGINALE -> original_channel;\n      PROVENANCE_TELEPHONE -> phone_contact_count; PROVENANCE_COURRIEL -> email_contact_count;\n      PROVENANCE_PERSONNE -> in_person_contact_count; PROVENANCE_COURRIER -> mail_contact_count;\n      PROVENANCE_TELECOPIEUR -> fax_contact_count; PROVENANCE_INSTANCE -> council_contact_count;\n      PROVENANCE_MOBILE -> mobile_app_contact_count; PROVENANCE_MEDIASOCIAUX -> social_media_contact_count;\n      PROVENANCE_SITEINTERNET -> website_contact_count; UNITE_RESP_PARENT -> responsible_unit;\n      LOC_LONG -> longitude; LOC_LAT -> latitude; LOC_X -> mtm_x; LOC_Y -> mtm_y;\n      DERNIER_STATUT -> last_status; DATE_DERNIER_STATUT -> last_status_at.\n    columns:\n      - name: contact_sk\n        description: >\n          Surrogate key, one per source row. md5 of a hash of all raw source columns plus a row\n          number within each group of identical rows, so it is deterministic across runs and\n          distinct even for exact duplicates.\n        data_tests:\n          - unique\n          - not_null\n      - name: request_id\n        description: >\n          Request identifier (source ID_UNIQUE), e.g. '22-105694-A'. Null for all 'Information'\n          contacts. Unique among non-null values.\n      - name: request_base_id\n        description: request_id with any trailing '-A'/'-B' letter suffix removed. Null when request_id is null.\n      - name: request_id_suffix\n        description: The single letter after the final hyphen of request_id (e.g. 'A'), or null if there is none.\n      - name: is_unexpected_id_prefix\n        description: True when request_id starts with '20-' or '21-', which is unexpected because all contacts were created in 2022 or later.\n      - name: contact_nature\n        description: >\n          Kind of contact (source NATURE): Requete (service request), Information, Plainte\n          (complaint) or Commentaire (comment).\n      - name: activity_name\n        description: Service or topic the contact is about (source ACTI_NOM), French text. Known casing variants are unified.\n      - name: created_at\n        description: When the contact was created (source DDS_DATE_CREATION). Montreal local time, no timezone.\n      - name: last_status_at\n        description: When the status last changed (source DATE_DERNIER_STATUT). Montreal local time, no timezone. Equals created_at for contacts never updated.\n      - name: last_status\n        description: Most recent status of the contact, French text (e.g. Terminée, Refusée, Prise en charge). Null for 'Information' contacts.\n        data_tests:\n          # Every status in the data must exist in the status_mapping seed. A new, unmapped\n          # status fails here, so it cannot silently be treated as open downstream.\n          # (relationships ignores nulls, so Information contacts are fine.)\n          - relationships:\n              arguments:\n                to: ref('status_mapping')\n                field: status\n      - name: original_channel\n        description: Channel through which the contact originally arrived (source PROVENANCE_ORIGINALE), e.g. Téléphone, Mobile, Courriel.\n      - name: phone_contact_count\n        description: Number of times this request was reported by telephone (source PROVENANCE_TELEPHONE). A count, not a 0/1 flag.\n      - name: email_contact_count\n        description: Number of times reported by email (source PROVENANCE_COURRIEL). A count.\n      - name: in_person_contact_count\n        description: Number of times reported in person (source PROVENANCE_PERSONNE). A count.\n      - name: mail_contact_count\n        description: Number of times reported by postal mail (source PROVENANCE_COURRIER). A count.\n      - name: fax_contact_count\n        description: Number of times reported by fax (source PROVENANCE_TELECOPIEUR). A count.\n      - name: council_contact_count\n        description: Number of times reported through a municipal body or council (source PROVENANCE_INSTANCE). A count.\n      - name: mobile_app_contact_count\n        description: Number of times reported through the mobile app (source PROVENANCE_MOBILE). A count.\n      - name: social_media_contact_count\n        description: Number of times reported through social media (source PROVENANCE_MEDIASOCIAUX). A count.\n      - name: website_contact_count\n        description: Number of times reported through the website (source PROVENANCE_SITEINTERNET). A count.\n      - name: responsible_unit\n        description: Parent organizational unit responsible for handling the contact (source UNITE_RESP_PARENT).\n      - name: location_type\n        description: Kind of location (source TYPE_LIEU_INTERV) - Adresse, Intersection, Troncon (street segment) or Installation (facility). Null for 'Information' contacts.\n      - name: street\n        description: Street name of the location (source RUE).\n      - name: cross_street_1\n        description: First cross street for Intersection locations (source RUE_INTERSECTION1).\n      - name: cross_street_2\n        description: Second cross street for Intersection locations (source RUE_INTERSECTION2).\n      - name: postal_code\n        description: Postal code, uppercase with no spaces (e.g. 'H2L3A7').\n      - name: borough\n        description: >\n          Borough or reconciled municipality as recorded on the contact (source ARRONDISSEMENT),\n          with ' - ' separators standardized to '-' to match borough_geo.\n      - name: borough_geo\n        description: Borough derived from the geocoded coordinates (source ARRONDISSEMENT_GEO). Same separator format as borough.\n      - name: borough_mismatch\n        description: True when borough and borough_geo are both present and differ after normalization.\n      - name: is_non_borough_value\n        description: True when borough is a placeholder rather than a real borough ('Ville de Montréal' or 'Extérieur de Montréal').\n      - name: longitude\n        description: Longitude in WGS84 degrees (source LOC_LONG).\n      - name: latitude\n        description: Latitude in WGS84 degrees (source LOC_LAT).\n      - name: mtm_x\n        description: X coordinate in the projected MTM zone 8 system (source LOC_X).\n      - name: mtm_y\n        description: Y coordinate in the projected MTM zone 8 system (source LOC_Y).\n      - name: has_geocoding_error\n        description: True when the city's geographic database flagged a location error (source LOC_ERREUR_GDT = 1).\n      - name: is_exact_duplicate\n        description: True when the row belongs to a group of rows identical across every source column (all copies are flagged, including the first).\n",
+  "column_profile": {
+   "row_count": 3223467,
+   "columns": {
+    "contact_sk": {
+     "type": "VARCHAR",
+     "null_pct": 0.0,
+     "distinct_count": 3223467,
+     "all_distinct": true,
+     "min_length": 32,
+     "max_length": 32
+    },
+    "request_id": {
+     "type": "VARCHAR",
+     "null_pct": 45.515,
+     "distinct_count": 1756293,
+     "all_distinct": true,
+     "min_length": 4,
+     "max_length": 11
+    },
+    "request_base_id": {
+     "type": "VARCHAR",
+     "null_pct": 45.515,
+     "distinct_count": 1756282,
+     "all_distinct": false,
+     "min_length": 4,
+     "max_length": 9
+    },
+    "request_id_suffix": {
+     "type": "VARCHAR",
+     "null_pct": 99.943,
+     "distinct_count": 2,
+     "all_distinct": false,
+     "min_length": 1,
+     "max_length": 1,
+     "top_values": [
+      {
+       "value": "A",
+       "count": 1827
+      },
+      {
+       "value": "B",
+       "count": 11
+      }
+     ],
+     "values_complete": true
+    },
+    "is_unexpected_id_prefix": {
+     "type": "BOOLEAN",
+     "null_pct": 0.0,
+     "distinct_count": 2,
+     "all_distinct": false,
+     "top_values": [
+      {
+       "value": false,
+       "count": 3223464
+      },
+      {
+       "value": true,
+       "count": 3
+      }
+     ],
+     "values_complete": true
+    },
+    "contact_nature": {
+     "type": "VARCHAR",
+     "null_pct": 0.0,
+     "distinct_count": 4,
+     "all_distinct": false,
+     "min_length": 7,
+     "max_length": 11,
+     "top_values": [
+      {
+       "value": "Requete",
+       "count": 1698140
+      },
+      {
+       "value": "Information",
+       "count": 1467174
+      },
+      {
+       "value": "Commentaire",
+       "count": 29559
+      },
+      {
+       "value": "Plainte",
+       "count": 28594
+      }
+     ],
+     "values_complete": true
+    },
+    "activity_name": {
+     "type": "VARCHAR",
+     "null_pct": 0.0,
+     "distinct_count": 995,
+     "all_distinct": false,
+     "min_length": 3,
+     "max_length": 71
+    },
+    "created_at": {
+     "type": "TIMESTAMP",
+     "null_pct": 0.0,
+     "distinct_count": 3131587,
+     "all_distinct": false,
+     "min": "2022-01-01 00:13:06",
+     "max": "2026-10-10 21:52:12"
+    },
+    "last_status_at": {
+     "type": "TIMESTAMP",
+     "null_pct": 0.0,
+     "distinct_count": 3000131,
+     "all_distinct": false,
+     "min": "2022-01-01 06:03:54",
+     "max": "2026-10-10 23:46:41"
+    },
+    "last_status": {
+     "type": "VARCHAR",
+     "null_pct": 45.515,
+     "distinct_count": 9,
+     "all_distinct": false,
+     "min_length": 7,
+     "max_length": 25,
+     "top_values": [
+      {
+       "value": "Terminée",
+       "count": 1653784
+      },
+      {
+       "value": "Refusée",
+       "count": 47195
+      },
+      {
+       "value": "Prise en charge",
+       "count": 29910
+      },
+      {
+       "value": "Annulée",
+       "count": 10688
+      },
+      {
+       "value": "Transmise pour traitement",
+       "count": 9090
+      },
+      {
+       "value": "Acceptée",
+       "count": 4355
+      },
+      {
+       "value": "Supprimée",
+       "count": 1085
+      },
+      {
+       "value": "Réactivée",
+       "count": 157
+      },
+      {
+       "value": "Urgente",
+       "count": 29
+      }
+     ],
+     "values_complete": true
+    },
+    "original_channel": {
+     "type": "VARCHAR",
+     "null_pct": 0.057,
+     "distinct_count": 9,
+     "all_distinct": false,
+     "min_length": 6,
+     "max_length": 14,
+     "top_values": [
+      {
+       "value": "Téléphone",
+       "count": 2635729
+      },
+      {
+       "value": "Personne",
+       "count": 185970
+      },
+      {
+       "value": "Mobile",
+       "count": 175728
+      },
+      {
+       "value": "Courriel",
+       "count": 122371
+      },
+      {
+       "value": "Internet",
+       "count": 97208
+      },
+      {
+       "value": "Courrier",
+       "count": 2256
+      },
+      {
+       "value": "Instance",
+       "count": 1763
+      },
+      {
+       "value": "Médias sociaux",
+       "count": 573
+      },
+      {
+       "value": "Télécopieur",
+       "count": 30
+      }
+     ],
+     "values_complete": true
+    },
+    "phone_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 42,
+     "all_distinct": false,
+     "min": "0",
+     "max": "60"
+    },
+    "email_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 23,
+     "all_distinct": false,
+     "min": "0",
+     "max": "37"
+    },
+    "in_person_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 15,
+     "all_distinct": false,
+     "min": "0",
+     "max": "15",
+     "top_values": [
+      {
+       "value": "0",
+       "count": 3036081
+      },
+      {
+       "value": "1",
+       "count": 176051
+      },
+      {
+       "value": "2",
+       "count": 8682
+      },
+      {
+       "value": "3",
+       "count": 1807
+      },
+      {
+       "value": "4",
+       "count": 519
+      },
+      {
+       "value": "5",
+       "count": 175
+      },
+      {
+       "value": "6",
+       "count": 77
+      },
+      {
+       "value": "7",
+       "count": 30
+      },
+      {
+       "value": "8",
+       "count": 19
+      },
+      {
+       "value": "10",
+       "count": 9
+      }
+     ],
+     "values_complete": false
+    },
+    "mail_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 4,
+     "all_distinct": false,
+     "min": "0",
+     "max": "3",
+     "top_values": [
+      {
+       "value": "0",
+       "count": 3221157
+      },
+      {
+       "value": "1",
+       "count": 2237
+      },
+      {
+       "value": "2",
+       "count": 60
+      },
+      {
+       "value": "3",
+       "count": 13
+      }
+     ],
+     "values_complete": true
+    },
+    "fax_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 2,
+     "all_distinct": false,
+     "min": "0",
+     "max": "1",
+     "top_values": [
+      {
+       "value": "0",
+       "count": 3223437
+      },
+      {
+       "value": "1",
+       "count": 30
+      }
+     ],
+     "values_complete": true
+    },
+    "council_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 6,
+     "all_distinct": false,
+     "min": "0",
+     "max": "6",
+     "top_values": [
+      {
+       "value": "0",
+       "count": 3221678
+      },
+      {
+       "value": "1",
+       "count": 1739
+      },
+      {
+       "value": "2",
+       "count": 44
+      },
+      {
+       "value": "3",
+       "count": 3
+      },
+      {
+       "value": "4",
+       "count": 2
+      },
+      {
+       "value": "6",
+       "count": 1
+      }
+     ],
+     "values_complete": true
+    },
+    "mobile_app_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 32,
+     "all_distinct": false,
+     "min": "0",
+     "max": "49",
+     "top_values": [
+      {
+       "value": "0",
+       "count": 3042497
+      },
+      {
+       "value": "1",
+       "count": 165280
+      },
+      {
+       "value": "2",
+       "count": 12040
+      },
+      {
+       "value": "3",
+       "count": 2263
+      },
+      {
+       "value": "4",
+       "count": 747
+      },
+      {
+       "value": "5",
+       "count": 299
+      },
+      {
+       "value": "6",
+       "count": 116
+      },
+      {
+       "value": "7",
+       "count": 77
+      },
+      {
+       "value": "8",
+       "count": 39
+      },
+      {
+       "value": "9",
+       "count": 27
+      }
+     ],
+     "values_complete": false
+    },
+    "social_media_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 8,
+     "all_distinct": false,
+     "min": "0",
+     "max": "7",
+     "top_values": [
+      {
+       "value": "0",
+       "count": 3222869
+      },
+      {
+       "value": "1",
+       "count": 545
+      },
+      {
+       "value": "2",
+       "count": 33
+      },
+      {
+       "value": "3",
+       "count": 11
+      },
+      {
+       "value": "4",
+       "count": 4
+      },
+      {
+       "value": "6",
+       "count": 2
+      },
+      {
+       "value": "7",
+       "count": 2
+      },
+      {
+       "value": "5",
+       "count": 1
+      }
+     ],
+     "values_complete": true
+    },
+    "website_contact_count": {
+     "type": "INTEGER",
+     "null_pct": 0.0,
+     "distinct_count": 27,
+     "all_distinct": false,
+     "min": "0",
+     "max": "84",
+     "top_values": [
+      {
+       "value": "0",
+       "count": 3122151
+      },
+      {
+       "value": "1",
+       "count": 92762
+      },
+      {
+       "value": "2",
+       "count": 6423
+      },
+      {
+       "value": "3",
+       "count": 1251
+      },
+      {
+       "value": "4",
+       "count": 413
+      },
+      {
+       "value": "5",
+       "count": 197
+      },
+      {
+       "value": "6",
+       "count": 100
+      },
+      {
+       "value": "7",
+       "count": 56
+      },
+      {
+       "value": "8",
+       "count": 34
+      },
+      {
+       "value": "9",
+       "count": 26
+      }
+     ],
+     "values_complete": false
+    },
+    "responsible_unit": {
+     "type": "VARCHAR",
+     "null_pct": 0.0,
+     "distinct_count": 52,
+     "all_distinct": false,
+     "min_length": 5,
+     "max_length": 60
+    },
+    "location_type": {
+     "type": "VARCHAR",
+     "null_pct": 45.516,
+     "distinct_count": 4,
+     "all_distinct": false,
+     "min_length": 7,
+     "max_length": 12,
+     "top_values": [
+      {
+       "value": "Adresse",
+       "count": 1478674
+      },
+      {
+       "value": "Intersection",
+       "count": 195665
+      },
+      {
+       "value": "Troncon",
+       "count": 68356
+      },
+      {
+       "value": "Installation",
+       "count": 13592
+      }
+     ],
+     "values_complete": true
+    },
+    "street": {
+     "type": "VARCHAR",
+     "null_pct": 52.912,
+     "distinct_count": 4808,
+     "all_distinct": false,
+     "min_length": 6,
+     "max_length": 40
+    },
+    "cross_street_1": {
+     "type": "VARCHAR",
+     "null_pct": 91.824,
+     "distinct_count": 4377,
+     "all_distinct": false,
+     "min_length": 6,
+     "max_length": 40
+    },
+    "cross_street_2": {
+     "type": "VARCHAR",
+     "null_pct": 91.829,
+     "distinct_count": 4493,
+     "all_distinct": false,
+     "min_length": 6,
+     "max_length": 40
+    },
+    "postal_code": {
+     "type": "VARCHAR",
+     "null_pct": 57.143,
+     "distinct_count": 34873,
+     "all_distinct": false,
+     "min_length": 6,
+     "max_length": 6
+    },
+    "borough": {
+     "type": "VARCHAR",
+     "null_pct": 45.516,
+     "distinct_count": 35,
+     "all_distinct": false,
+     "min_length": 5,
+     "max_length": 40,
+     "top_values": [
+      {
+       "value": "Mercier-Hochelaga-Maisonneuve",
+       "count": 172780
+      },
+      {
+       "value": "Rosemont-La Petite-Patrie",
+       "count": 148514
+      },
+      {
+       "value": "Ahuntsic-Cartierville",
+       "count": 145208
+      },
+      {
+       "value": "Ville-Marie",
+       "count": 144170
+      },
+      {
+       "value": "Le Plateau-Mont-Royal",
+       "count": 140650
+      },
+      {
+       "value": "Saint-Laurent",
+       "count": 139198
+      },
+      {
+       "value": "Villeray-Saint-Michel-Parc-Extension",
+       "count": 128344
+      },
+      {
+       "value": "Côte-des-Neiges-Notre-Dame-de-Grâce",
+       "count": 113862
+      },
+      {
+       "value": "Le Sud-Ouest",
+       "count": 97791
+      },
+      {
+       "value": "Rivière-des-Prairies-Pointe-aux-Trembles",
+       "count": 96923
+      }
+     ],
+     "values_complete": false
+    },
+    "borough_geo": {
+     "type": "VARCHAR",
+     "null_pct": 45.564,
+     "distinct_count": 33,
+     "all_distinct": false,
+     "min_length": 5,
+     "max_length": 40,
+     "top_values": [
+      {
+       "value": "Mercier-Hochelaga-Maisonneuve",
+       "count": 172103
+      },
+      {
+       "value": "Rosemont-La Petite-Patrie",
+       "count": 147882
+      },
+      {
+       "value": "Ahuntsic-Cartierville",
+       "count": 144900
+      },
+      {
+       "value": "Le Plateau-Mont-Royal",
+       "count": 143129
+      },
+      {
+       "value": "Ville-Marie",
+       "count": 142130
+      },
+      {
+       "value": "Saint-Laurent",
+       "count": 138886
+      },
+      {
+       "value": "Villeray-Saint-Michel-Parc-Extension",
+       "count": 129627
+      },
+      {
+       "value": "Côte-des-Neiges-Notre-Dame-de-Grâce",
+       "count": 113316
+      },
+      {
+       "value": "Le Sud-Ouest",
+       "count": 97127
+      },
+      {
+       "value": "Rivière-des-Prairies-Pointe-aux-Trembles",
+       "count": 96978
+      }
+     ],
+     "values_complete": false
+    },
+    "borough_mismatch": {
+     "type": "BOOLEAN",
+     "null_pct": 0.0,
+     "distinct_count": 2,
+     "all_distinct": false,
+     "top_values": [
+      {
+       "value": false,
+       "count": 3211493
+      },
+      {
+       "value": true,
+       "count": 11974
+      }
+     ],
+     "values_complete": true
+    },
+    "is_non_borough_value": {
+     "type": "BOOLEAN",
+     "null_pct": 0.0,
+     "distinct_count": 2,
+     "all_distinct": false,
+     "top_values": [
+      {
+       "value": false,
+       "count": 3222072
+      },
+      {
+       "value": true,
+       "count": 1395
+      }
+     ],
+     "values_complete": true
+    },
+    "longitude": {
+     "type": "DOUBLE",
+     "null_pct": 45.562,
+     "distinct_count": 59977,
+     "all_distinct": false,
+     "min": "-73.97692901042555",
+     "max": "-73.47932556503345"
+    },
+    "latitude": {
+     "type": "DOUBLE",
+     "null_pct": 45.562,
+     "distinct_count": 59973,
+     "all_distinct": false,
+     "min": "45.40269849581368",
+     "max": "45.703663947"
+    },
+    "mtm_x": {
+     "type": "DOUBLE",
+     "null_pct": 45.562,
+     "distinct_count": 59960,
+     "all_distinct": false,
+     "min": "267475.74691822164",
+     "max": "306409.9299141433"
+    },
+    "mtm_y": {
+     "type": "DOUBLE",
+     "null_pct": 45.562,
+     "distinct_count": 59954,
+     "all_distinct": false,
+     "min": "5029292.82117674",
+     "max": "5062642.45499946"
+    },
+    "has_geocoding_error": {
+     "type": "BOOLEAN",
+     "null_pct": 45.562,
+     "distinct_count": 2,
+     "all_distinct": false,
+     "top_values": [
+      {
+       "value": false,
+       "count": 1690189
+      },
+      {
+       "value": true,
+       "count": 64599
+      }
+     ],
+     "values_complete": true
+    },
+    "is_exact_duplicate": {
+     "type": "BOOLEAN",
+     "null_pct": 0.0,
+     "distinct_count": 2,
+     "all_distinct": false,
+     "top_values": [
+      {
+       "value": false,
+       "count": 3222041
+      },
+      {
+       "value": true,
+       "count": 1426
+      }
+     ],
+     "values_complete": true
+    }
+   }
+  },
+  "existing_tests": [
+   {
+    "column": "contact_sk",
+    "test": "unique"
+   },
+   {
+    "column": "contact_sk",
+    "test": "not_null"
+   },
+   {
+    "column": "last_status",
+    "test": "relationships",
+    "config": {
+     "arguments": {
+      "to": "ref('status_mapping')",
+      "field": "status"
+     }
+    }
+   }
+  ],
+  "available_models": {
+   "int_311__service_requests": [
+    "request_id",
+    "request_base_id",
+    "request_id_suffix",
+    "is_unexpected_id_prefix",
+    "contact_nature",
+    "activity_name",
+    "created_at",
+    "last_status",
+    "last_status_at",
+    "is_closed",
+    "closed_outcome",
+    "resolution_days",
+    "original_channel",
+    "phone_contact_count",
+    "email_contact_count",
+    "in_person_contact_count",
+    "mail_contact_count",
+    "fax_contact_count",
+    "council_contact_count",
+    "mobile_app_contact_count",
+    "social_media_contact_count",
+    "website_contact_count",
+    "responsible_unit",
+    "location_type",
+    "street",
+    "cross_street_1",
+    "cross_street_2",
+    "postal_code",
+    "borough",
+    "borough_geo",
+    "borough_mismatch",
+    "longitude",
+    "latitude",
+    "has_geocoding_error"
+   ],
+   "int_311__information_contacts": [
+    "contact_sk",
+    "contact_nature",
+    "activity_name",
+    "created_at",
+    "original_channel",
+    "phone_contact_count",
+    "email_contact_count",
+    "in_person_contact_count",
+    "mail_contact_count",
+    "fax_contact_count",
+    "council_contact_count",
+    "mobile_app_contact_count",
+    "social_media_contact_count",
+    "website_contact_count",
+    "responsible_unit",
+    "is_exact_duplicate"
+   ],
+   "dim_date": [
+    "date_key",
+    "date_day",
+    "year",
+    "quarter",
+    "month",
+    "month_name",
+    "day_of_month",
+    "day_of_week",
+    "day_name",
+    "is_weekend",
+    "week_start_date"
+   ],
+   "dim_borough": [
+    "borough_key",
+    "borough_name",
+    "is_non_borough_value",
+    "is_unknown_member"
+   ],
+   "dim_activity": [
+    "activity_key",
+    "activity_name",
+    "is_unknown_member"
+   ],
+   "fct_service_requests": [
+    "request_id",
+    "created_date_key",
+    "last_status_date_key",
+    "activity_key",
+    "responsible_borough_key",
+    "location_borough_key",
+    "request_base_id",
+    "request_id_suffix",
+    "is_unexpected_id_prefix",
+    "contact_nature",
+    "created_at",
+    "last_status",
+    "last_status_at",
+    "is_closed",
+    "closed_outcome",
+    "resolution_days",
+    "original_channel",
+    "phone_contact_count",
+    "email_contact_count",
+    "in_person_contact_count",
+    "mail_contact_count",
+    "fax_contact_count",
+    "council_contact_count",
+    "mobile_app_contact_count",
+    "social_media_contact_count",
+    "website_contact_count",
+    "responsible_unit",
+    "location_type",
+    "street",
+    "postal_code",
+    "latitude",
+    "longitude",
+    "has_geocoding_error",
+    "borough_mismatch"
+   ],
+   "fct_information_contacts": [
+    "contact_sk",
+    "created_date_key",
+    "activity_key",
+    "contact_nature",
+    "created_at",
+    "original_channel",
+    "phone_contact_count",
+    "email_contact_count",
+    "in_person_contact_count",
+    "mail_contact_count",
+    "fax_contact_count",
+    "council_contact_count",
+    "mobile_app_contact_count",
+    "social_media_contact_count",
+    "website_contact_count",
+    "responsible_unit",
+    "is_exact_duplicate"
+   ],
+   "stg_311__contacts": [
+    "contact_sk",
+    "request_id",
+    "request_base_id",
+    "request_id_suffix",
+    "is_unexpected_id_prefix",
+    "contact_nature",
+    "activity_name",
+    "created_at",
+    "last_status_at",
+    "last_status",
+    "original_channel",
+    "phone_contact_count",
+    "email_contact_count",
+    "in_person_contact_count",
+    "mail_contact_count",
+    "fax_contact_count",
+    "council_contact_count",
+    "mobile_app_contact_count",
+    "social_media_contact_count",
+    "website_contact_count",
+    "responsible_unit",
+    "location_type",
+    "street",
+    "cross_street_1",
+    "cross_street_2",
+    "postal_code",
+    "borough",
+    "borough_geo",
+    "borough_mismatch",
+    "is_non_borough_value",
+    "longitude",
+    "latitude",
+    "mtm_x",
+    "mtm_y",
+    "has_geocoding_error",
+    "is_exact_duplicate"
+   ],
+   "status_mapping": [
+    "status",
+    "is_closed",
+    "closed_outcome"
+   ]
+  }
+ },
+ "filtered": [],
+ "proposals": [
+  {
+   "column": "request_id",
+   "test_type": "unique",
+   "config": {},
+   "rationale": "Description: unique among non-null values; dbt unique ignores nulls.",
+   "evidence": "request_id all_distinct=true, distinct_count=1756293",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "contact_nature",
+   "test_type": "not_null",
+   "config": {},
+   "rationale": "Every contact has a nature.",
+   "evidence": "null_pct=0.0",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "contact_nature",
+   "test_type": "accepted_values",
+   "config": {
+    "values": [
+     "Requete",
+     "Information",
+     "Plainte",
+     "Commentaire"
+    ]
+   },
+   "rationale": "Description lists exactly four natures.",
+   "evidence": "values_complete=true, distinct_count=4",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "original_channel",
+   "test_type": "accepted_values",
+   "config": {
+    "values": [
+     "Téléphone",
+     "Personne",
+     "Mobile",
+     "Courriel",
+     "Internet",
+     "Courrier",
+     "Instance",
+     "Médias sociaux",
+     "Télécopieur"
+    ]
+   },
+   "rationale": "Closed set of channels.",
+   "evidence": "values_complete=true, distinct_count=9",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "location_type",
+   "test_type": "accepted_values",
+   "config": {
+    "values": [
+     "Adresse",
+     "Intersection",
+     "Troncon",
+     "Installation"
+    ]
+   },
+   "rationale": "Description lists four location types.",
+   "evidence": "values_complete=true, distinct_count=4",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "request_id_suffix",
+   "test_type": "accepted_values",
+   "config": {
+    "values": [
+     "A",
+     "B"
+    ]
+   },
+   "rationale": "Suffix letters observed are only A and B.",
+   "evidence": "values_complete=true, top_values A,B",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "created_at",
+   "test_type": "not_null",
+   "config": {},
+   "rationale": "Creation timestamp is always present.",
+   "evidence": "null_pct=0.0",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "last_status_at",
+   "test_type": "not_null",
+   "config": {},
+   "rationale": "Equals created_at for never-updated contacts, so always present.",
+   "evidence": "null_pct=0.0",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "activity_name",
+   "test_type": "not_null",
+   "config": {},
+   "rationale": "Every contact has an activity.",
+   "evidence": "null_pct=0.0",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "responsible_unit",
+   "test_type": "not_null",
+   "config": {},
+   "rationale": "Every contact has a responsible unit.",
+   "evidence": "null_pct=0.0",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": null,
+   "test_type": "singular_sql",
+   "config": {
+    "slug": "request_id_null_iff_information",
+    "sql": "select * from {{ ref('stg_311__contacts') }} where (request_id is null) <> (contact_nature = 'Information')"
+   },
+   "rationale": "request_id is null for all and only Information contacts.",
+   "evidence": "request_id null_pct=45.515 equals Information share (1467174/3223467); description says null for all Information contacts",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": null,
+   "test_type": "singular_sql",
+   "config": {
+    "slug": "last_status_not_before_created",
+    "sql": "select * from {{ ref('stg_311__contacts') }} where last_status_at < created_at"
+   },
+   "rationale": "Last status change cannot precede creation; equals created_at when never updated.",
+   "evidence": "last_status_at description; both timestamps null_pct=0.0",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": null,
+   "test_type": "singular_sql",
+   "config": {
+    "slug": "contact_counts_non_negative",
+    "sql": "select * from {{ ref('stg_311__contacts') }} where phone_contact_count < 0 or email_contact_count < 0 or in_person_contact_count < 0 or mail_contact_count < 0 or fax_contact_count < 0 or council_contact_count < 0 or mobile_app_contact_count < 0 or social_media_contact_count < 0 or website_contact_count < 0"
+   },
+   "rationale": "Channel counts are counts and cannot be negative.",
+   "evidence": "all count columns min=0",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": null,
+   "test_type": "singular_sql",
+   "config": {
+    "slug": "coordinates_within_montreal",
+    "sql": "select * from {{ ref('stg_311__contacts') }} where (latitude is not null and (latitude not between 45.3 and 45.8 or longitude not between -74.1 and -73.4)) or ((latitude is null) <> (longitude is null))"
+   },
+   "rationale": "Coordinates must be in the Montreal area and be present together.",
+   "evidence": "latitude 45.40-45.70, longitude -73.98 to -73.48, identical null_pct=45.562",
+   "validation": {
+    "status": "pass",
+    "failures": 0,
+    "message": ""
+   }
+  },
+  {
+   "column": "is_unexpected_id_prefix",
+   "test_type": "accepted_values",
+   "config": {
+    "values": [
+     false
+    ]
+   },
+   "rationale": "Monitor unexpected 20-/21- request prefixes; known defect.",
+   "evidence": "true count=3 of 3223467",
+   "validation": {
+    "status": "fail",
+    "failures": 1,
+    "message": "Got 1 result, configured to fail if != 0"
+   }
+  },
+  {
+   "column": "borough_mismatch",
+   "test_type": "accepted_values",
+   "config": {
+    "values": [
+     false
+    ]
+   },
+   "rationale": "Monitor borough vs geo-borough disagreement.",
+   "evidence": "true count=11974",
+   "validation": {
+    "status": "fail",
+    "failures": 1,
+    "message": "Got 1 result, configured to fail if != 0"
+   }
+  },
+  {
+   "column": "is_non_borough_value",
+   "test_type": "accepted_values",
+   "config": {
+    "values": [
+     false
+    ]
+   },
+   "rationale": "Monitor placeholder borough values.",
+   "evidence": "true count=1395",
+   "validation": {
+    "status": "fail",
+    "failures": 1,
+    "message": "Got 1 result, configured to fail if != 0"
+   }
+  },
+  {
+   "column": "is_exact_duplicate",
+   "test_type": "accepted_values",
+   "config": {
+    "values": [
+     false
+    ]
+   },
+   "rationale": "Monitor exact duplicate source rows.",
+   "evidence": "true count=1426",
+   "validation": {
+    "status": "fail",
+    "failures": 1,
+    "message": "Got 1 result, configured to fail if != 0"
+   }
+  },
+  {
+   "column": "has_geocoding_error",
+   "test_type": "accepted_values",
+   "config": {
+    "values": [
+     false
+    ]
+   },
+   "rationale": "Monitor geocoding errors flagged by the city's GDT.",
+   "evidence": "true count=64599 vs false 1690189",
+   "validation": {
+    "status": "fail",
+    "failures": 1,
+    "message": "Got 1 result, configured to fail if != 0"
+   }
+  }
+ ]
+}

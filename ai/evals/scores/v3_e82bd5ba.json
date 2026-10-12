@@ -1,0 +1,57 @@
+{
+ "proposals_file": "e82bd5ba",
+ "model": "stg_311__contacts",
+ "prompt_version": "v3",
+ "llm_model": "claude-sonnet-5-5",
+ "tokens": {
+  "input_tokens": 17913,
+  "output_tokens": 2923
+ },
+ "n_proposals": 20,
+ "n_pass": 15,
+ "n_fail": 5,
+ "n_warn_severity_proposed": 0,
+ "n_error": 0,
+ "issues": [
+  {
+   "id": "exact_duplicates",
+   "caught": true,
+   "matched_proposals": [
+    20
+   ]
+  },
+  {
+   "id": "borough_mismatch",
+   "caught": true,
+   "matched_proposals": [
+    17
+   ]
+  },
+  {
+   "id": "unexpected_id_prefix",
+   "caught": true,
+   "matched_proposals": [
+    16
+   ]
+  },
+  {
+   "id": "suffixed_ids",
+   "caught": false,
+   "matched_proposals": []
+  },
+  {
+   "id": "non_borough_values",
+   "caught": true,
+   "matched_proposals": [
+    18
+   ]
+  },
+  {
+   "id": "casing_whitespace_format",
+   "caught": false,
+   "matched_proposals": []
+  }
+ ],
+ "caught": 4,
+ "total": 6
+}

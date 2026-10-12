@@ -33,6 +33,8 @@ models:
         description: >
           Request identifier (source ID_UNIQUE), e.g. '22-105694-A'. Null for all 'Information'
           contacts. Unique among non-null values.
+        data_tests:
+          - unique
       - name: request_base_id
         description: request_id with any trailing '-A'/'-B' letter suffix removed. Null when request_id is null.
       - name: request_id_suffix
@@ -43,12 +45,23 @@ models:
         description: >
           Kind of contact (source NATURE): Requete (service request), Information, Plainte
           (complaint) or Commentaire (comment).
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["Requete", "Information", "Plainte", "Commentaire"]
       - name: activity_name
         description: Service or topic the contact is about (source ACTI_NOM), French text. Known casing variants are unified.
+        data_tests:
+          - not_null
       - name: created_at
         description: When the contact was created (source DDS_DATE_CREATION). Montreal local time, no timezone.
+        data_tests:
+          - not_null
       - name: last_status_at
         description: When the status last changed (source DATE_DERNIER_STATUT). Montreal local time, no timezone. Equals created_at for contacts never updated.
+        data_tests:
+          - not_null
       - name: last_status
         description: Most recent status of the contact, French text (e.g. Terminée, Refusée, Prise en charge). Null for 'Information' contacts.
         data_tests:
@@ -61,6 +74,10 @@ models:
                 field: status
       - name: original_channel
         description: Channel through which the contact originally arrived (source PROVENANCE_ORIGINALE), e.g. Téléphone, Mobile, Courriel.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Téléphone", "Personne", "Mobile", "Courriel", "Internet", "Courrier", "Instance", "Médias sociaux", "Télécopieur"]
       - name: phone_contact_count
         description: Number of times this request was reported by telephone (source PROVENANCE_TELEPHONE). A count, not a 0/1 flag.
       - name: email_contact_count
@@ -81,8 +98,14 @@ models:
         description: Number of times reported through the website (source PROVENANCE_SITEINTERNET). A count.
       - name: responsible_unit
         description: Parent organizational unit responsible for handling the contact (source UNITE_RESP_PARENT).
+        data_tests:
+          - not_null
       - name: location_type
         description: Kind of location (source TYPE_LIEU_INTERV) - Adresse, Intersection, Troncon (street segment) or Installation (facility). Null for 'Information' contacts.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["Adresse", "Intersection", "Troncon", "Installation"]
       - name: street
         description: Street name of the location (source RUE).
       - name: cross_street_1

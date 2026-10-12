@@ -44,7 +44,9 @@ DECISIONS_LOG = LOG_DIR / "decisions.jsonl"
 DEFAULT_LLM = "claude-sonnet-5-5"
 LOW_CARDINALITY_MAX = 50  # columns with <= this many distinct values get a top-values list
 TOP_N = 10
+CANDIDATE_KEY_MIN_DISTINCT_RATIO = 0.9  # distinct/non-null at or above this => candidate key
 NO_VALUES_PATTERN = re.compile(r"street|postal|address|phone|email|latitude|longitude|mtm_|_id$|_sk$", re.I)
+PROMPT_VERSIONS = ("v1", "v2", "v3")
 ALLOWED_TYPES = ["not_null", "unique", "accepted_values", "relationships", "singular_sql"]
 NUMERIC_TYPES = ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT",
                  "UINTEGER", "UBIGINT", "FLOAT", "DOUBLE", "DECIMAL")
@@ -105,8 +107,14 @@ def existing_tests(model: str, yml: Path) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- profiling
-def profile_model(model: str) -> dict:
-    """Aggregate-only profile of every column. No raw rows leave this function."""
+def profile_model(model: str, extended: bool = False) -> dict:
+    """Aggregate-only profile of every column. No raw rows leave this function.
+
+    extended=True (prompt v3) adds (a) duplicate-value counts on candidate key columns and
+    (b) complete value lists for columns with up to LOW_CARDINALITY_MAX distinct values,
+    instead of only the top TOP_N. Both are still aggregates.
+    """
+    value_limit = LOW_CARDINALITY_MAX if extended else TOP_N
     con = duckdb.connect(str(DB_PATH), read_only=True)
     table = f"main.{model}"
     total = con.execute(f"select count(*) from {table}").fetchone()[0]
@@ -131,11 +139,21 @@ def profile_model(model: str) -> dict:
         if 0 < distinct <= LOW_CARDINALITY_MAX and not NO_VALUES_PATTERN.search(name):
             rows = con.execute(
                 f"select {q}, count(*) from {table} where {q} is not null "
-                f"group by 1 order by 2 desc, 1 limit {TOP_N}"
+                f"group by 1 order by 2 desc, 1 limit {value_limit}"
             ).fetchall()
             p["top_values"] = [{"value": str(v) if not isinstance(v, bool) else v, "count": c} for v, c in rows]
             # True only when the list above is the complete set of non-null values.
-            p["values_complete"] = distinct <= TOP_N
+            p["values_complete"] = distinct <= value_limit
+        if extended and nn > 0 and (
+            re.search(r"(_id|_sk|_key)$|^id$", name) or distinct / nn >= CANDIDATE_KEY_MIN_DISTINCT_RATIO
+        ):
+            # Candidate key column: how many values occur more than once, and in how many rows?
+            dv, dr = con.execute(
+                f"select count(*), coalesce(sum(n), 0) from "
+                f"(select count(*) n from {table} where {q} is not null group by {q} having count(*) > 1)"
+            ).fetchone()
+            p["duplicate_values"] = dv  # distinct values that appear more than once
+            p["rows_in_duplicate_values"] = int(dr)
         profile["columns"][name] = p
     con.close()
     return profile
@@ -165,7 +183,7 @@ Rules:
 - Set "column" to null for singular_sql tests that span columns.
 Return your answer ONLY by calling the submit_proposals tool."""
 
-PROPOSAL_TOOL = {
+_BASE_PROPOSAL_TOOL = {
     "name": "submit_proposals",
     "description": "Submit the proposed dbt tests.",
     "input_schema": {
@@ -191,7 +209,36 @@ PROPOSAL_TOOL = {
 }
 
 
-def call_llm(model: str, sql: str, yml_text: str, profile: dict, existing: list, models: dict) -> tuple[dict, dict]:
+# v2 adds ONE generic rule (no column names): flag columns with a small non-zero count are
+# known-defect indicators and deserve a warn-severity monitoring test. v3 keeps this prompt
+# unchanged and only enriches the profile (see profile_model(extended=True)).
+MONITORING_RULE = """- Boolean flag columns whose true-count (or false-count) is small but non-zero relative to the row
+  count are known-defect indicators: the data producer is marking rows it knows are problematic.
+  For each such column, propose a monitoring test with "severity": "warn" that fails when flagged
+  rows exist, so the defect is tracked instead of silently ignored."""
+_RETURN = "Return your answer ONLY by calling"
+SYSTEM_PROMPTS = {
+    "v1": SYSTEM_PROMPT,
+    "v2": SYSTEM_PROMPT.replace(_RETURN, MONITORING_RULE + "\n" + _RETURN),
+}
+SYSTEM_PROMPTS["v3"] = SYSTEM_PROMPTS["v2"]
+
+
+def proposal_tool(version: str) -> dict:
+    """v2+ lets the model set an optional per-proposal severity."""
+    import copy
+
+    tool = copy.deepcopy(_BASE_PROPOSAL_TOOL)
+    if version != "v1":
+        tool["input_schema"]["properties"]["proposals"]["items"]["properties"]["severity"] = {
+            "type": "string", "enum": ["error", "warn"],
+            "description": "Optional. 'warn' for monitoring tests that are expected to fail on known defects.",
+        }
+    return tool
+
+
+def call_llm(model: str, sql: str, yml_text: str, profile: dict, existing: list, models: dict,
+             prompt_version: str = "v2") -> tuple[dict, dict]:
     import anthropic  # imported lazily so --review works without an API key
 
     if not os.getenv("ANTHROPIC_API_KEY"):
@@ -207,18 +254,18 @@ def call_llm(model: str, sql: str, yml_text: str, profile: dict, existing: list,
     }
     client = anthropic.Anthropic()
     try:
-        resp = _create(client, llm_model, payload)
+        resp = _create(client, llm_model, payload, prompt_version)
     except anthropic.APIError as e:
         sys.exit(f"Anthropic API error: {e}")
-    return _parse(resp, llm_model, payload)
+    return _parse(resp, llm_model, payload, prompt_version)
 
 
-def _create(client, llm_model, payload):
+def _create(client, llm_model, payload, prompt_version):
     return client.messages.create(
         model=llm_model,
         max_tokens=8000,
-        system=SYSTEM_PROMPT,
-        tools=[PROPOSAL_TOOL],
+        system=SYSTEM_PROMPTS[prompt_version],
+        tools=[proposal_tool(prompt_version)],
         # Forced tool_choice is rejected by this model family; "auto" plus the system prompt
         # ("answer ONLY by calling submit_proposals") works, and we verify a tool_use block below.
         tool_choice={"type": "auto"},
@@ -226,12 +273,13 @@ def _create(client, llm_model, payload):
     )
 
 
-def _parse(resp, llm_model, payload):
+def _parse(resp, llm_model, payload, prompt_version):
     block = next((b for b in resp.content if b.type == "tool_use"), None)
     if block is None:
         sys.exit("The model did not return structured proposals.")
     meta = {
         "llm_model": llm_model,
+        "prompt_version": prompt_version,
         "input_tokens": resp.usage.input_tokens,
         "output_tokens": resp.usage.output_tokens,
         "payload_sent": payload,
@@ -243,6 +291,8 @@ def _parse(resp, llm_model, payload):
 def check_proposal_shape(p: dict, model: str, models: dict, profile: dict) -> str | None:
     """Return an error string if the proposal can't be turned into a test, else None."""
     t, col, cfg = p.get("test_type"), p.get("column"), p.get("config") or {}
+    if p.get("severity") not in (None, "error", "warn"):
+        return f"invalid severity {p.get('severity')!r}"
     if t not in ALLOWED_TYPES:
         return f"unsupported test type {t!r}"
     if t != "singular_sql" and col not in profile["columns"]:
@@ -420,6 +470,11 @@ def write_singular(model: str, p: dict, severity: str | None) -> Path:
 
 # --------------------------------------------------------------------------- review
 def describe_test(p: dict) -> str:
+    s = describe_test_core(p)
+    return s + (" [proposed severity: warn]" if p.get("severity") == "warn" else "")
+
+
+def describe_test_core(p: dict) -> str:
     cfg = p.get("config") or {}
     if p["test_type"] == "accepted_values":
         return f"accepted_values {json.dumps(cfg.get('values'), ensure_ascii=False)}"
@@ -452,7 +507,8 @@ def log_decision(run: dict, p: dict, decision: str, written_to: str | None, note
     record = {
         "run_id": run["run_id"], "model": run["model"], "llm_model": run["llm_model"],
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "proposal": {k: p[k] for k in ("column", "test_type", "config", "rationale", "evidence")},
+        "prompt_version": run.get("prompt_version", "v1"),
+        "proposal": {k: p[k] for k in ("column", "test_type", "config", "rationale", "evidence", "severity") if k in p},
         "validation": p["validation"], "decision": decision, "written_to": written_to,
     }
     if note:
@@ -480,7 +536,12 @@ def review(run: dict, yml: Path) -> None:
         if status == "pass":
             options, prompt = {"y", "n", "q"}, "Add this test? [y]es / [n]o / [q]uit: "
         elif status in ("fail", "warn"):
-            options, prompt = {"y", "w", "n", "q"}, "FAILS on current data. [y]es add as error / [w]arn add as severity warn / [n]o / [q]uit: "
+            # Severity is enforced here, not left to the model (it was inconsistent across runs):
+            # a test that already fails on current data defaults to severity warn, because adding
+            # it as an error would break the build on a known defect. "e" overrides to error.
+            options = {"y", "w", "e", "n", "q"}
+            prompt = ("FAILS on current data, so it defaults to severity warn. "
+                      "[y/w] add as warn / [e] add as error / [n]o / [q]uit: ")
         else:
             options, prompt = {"n", "q"}, "Cannot be added (errored). [n]o / [q]uit: "
         # Answer format: "<choice>" or "<choice> | free-text note" (the note is logged).
@@ -496,29 +557,33 @@ def review(run: dict, yml: Path) -> None:
         if ans == "n":
             log_decision(run, p, "rejected", None, note)
             continue
-        severity = "warn" if ans == "w" else None
+        if status in ("fail", "warn"):
+            severity = None if ans == "e" else "warn"  # None = dbt default (error)
+        else:
+            severity = "warn" if p.get("severity") == "warn" else None
         if p["test_type"] == "singular_sql":
             written = str(write_singular(model, p, severity).relative_to(ROOT))
         else:
             add_to_yml(yml, model, p["column"], p, severity)
             written = str(yml.relative_to(ROOT))
-        log_decision(run, p, "approved_warn" if severity else "approved", written, note)
+        label = "approved_warn" if severity else ("approved_error" if status in ("fail", "warn") else "approved")
+        log_decision(run, p, label, written, note)
         print(f"      -> written to {written}")
     print("\nReview finished. Decisions appended to", DECISIONS_LOG.relative_to(ROOT))
 
 
 # --------------------------------------------------------------------------- main
-def propose(model: str) -> dict:
+def propose(model: str, prompt_version: str = "v2") -> dict:
     sql_path, yml_path = find_model(model)
     models = all_models()
     print(f"Profiling {model} (aggregates only)...")
-    profile = profile_model(model)
+    profile = profile_model(model, extended=(prompt_version == "v3"))
     existing = existing_tests(model, yml_path)
     print(f"  {profile['row_count']:,} rows, {len(profile['columns'])} columns, {len(existing)} existing tests")
 
-    print("Asking the LLM for proposals...")
+    print(f"Asking the LLM for proposals (prompt {prompt_version})...")
     result, meta = call_llm(model, sql_path.read_text(encoding="utf-8"), yml_path.read_text(encoding="utf-8"),
-                            profile, existing, models)
+                            profile, existing, models, prompt_version)
     raw = result.get("proposals", [])
     print(f"  {len(raw)} proposals ({meta['input_tokens']:,} in / {meta['output_tokens']:,} out tokens)")
 
@@ -542,7 +607,8 @@ def propose(model: str) -> dict:
         p["validation"] = v
     run = {
         "run_id": uuid.uuid4().hex[:8], "model": model, "created": datetime.now(timezone.utc).isoformat(),
-        "llm_model": meta["llm_model"], "usage": {k: meta[k] for k in ("input_tokens", "output_tokens")},
+        "llm_model": meta["llm_model"], "prompt_version": prompt_version,
+        "system_prompt": SYSTEM_PROMPTS[prompt_version], "usage": {k: meta[k] for k in ("input_tokens", "output_tokens")},
         "payload_sent": meta["payload_sent"], "filtered": filtered, "proposals": kept,
     }
     PROPOSALS_DIR.mkdir(parents=True, exist_ok=True)
@@ -557,6 +623,8 @@ def main() -> None:
     ap.add_argument("model")
     ap.add_argument("--propose-only", action="store_true", help="stop before the interactive review")
     ap.add_argument("--review", nargs="?", const="latest", metavar="FILE", help="review a saved proposals file")
+    ap.add_argument("--prompt-version", choices=PROMPT_VERSIONS, default="v2",
+                    help="v1 baseline, v2 +monitoring rule (default), v3 +richer profile (dropped: no gain)")
     args = ap.parse_args()
     load_dotenv(ROOT / ".env")
     _, yml_path = find_model(args.model)
@@ -573,7 +641,7 @@ def main() -> None:
         review(run, yml_path)
         return
 
-    run = propose(args.model)
+    run = propose(args.model, args.prompt_version)
     print_proposals(run["proposals"])
     if args.propose_only:
         print("\n--propose-only: stopping before review. Run again with --review to decide.")
